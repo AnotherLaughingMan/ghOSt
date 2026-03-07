@@ -14,6 +14,9 @@ out/
 *.dll
 *.so
 
+# Copilot instructions (local only)
+copilot-instructions.md
+
 # IDE / editor
 .vscode/
 .idea/
