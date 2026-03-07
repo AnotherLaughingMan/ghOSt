@@ -46,10 +46,12 @@
 13. [Application Compatibility Strategy](#13-application-compatibility-strategy)
 14. [Repository Structure](#14-repository-structure)
 15. [Build System & Artifacts](#15-build-system--artifacts)
-16. [Decision Records](#16-decision-records)
-17. [Contribution Standards](#17-contribution-standards)
-18. [Glossary](#18-glossary)
-19. [Appendices](#19-appendices)
+16. [Versioning Architecture](#16-versioning-architecture)
+17. [Development Roadmap](#17-development-roadmap)
+18. [Decision Records](#18-decision-records)
+19. [Contribution Standards](#19-contribution-standards)
+20. [Glossary](#20-glossary)
+21. [Appendices](#21-appendices)
 
 ---
 
@@ -63,6 +65,8 @@ It ships as two distinct profiles from a single codebase:
 - **Full Install Profile**: a complete desktop/server operating system with graphical UX, broad application compatibility, and full COM support.
 
 ghOSt is not a Linux distribution, not a fork of an existing OS, and not a wrapper. It is a ground-up operating system with its own kernel, boot path, driver model, and user experience.
+
+**Native architecture: 64-bit (x86-64).** The kernel, drivers, and all system services run natively in 64-bit mode. A built-in 32-bit compatibility subsystem (name TBD) enables 32-bit application execution on the Full Install Profile, similar in concept to how Windows runs 32-bit apps on 64-bit — but with ghOSt's own design and branding.
 
 ---
 
@@ -170,6 +174,18 @@ These principles apply to all code and architecture decisions project-wide.
 - Memory layouts, hardware assumptions, and trust boundaries go near the code they affect.
 - If it's not documented, it's not a decision — it's an accident.
 
+### 4.8 No Scaffolding in Kernel Space
+
+Kernel code is too sensitive for placeholder implementations. Every function that is committed to the kernel must be **fully implemented, tested, and correct** — not stubbed, not scaffolded, not "to be completed later."
+
+- **No TODO stubs in kernel-space code.** If a function exists, it must work.
+- **No empty function bodies** that silently return success. If a capability doesn't exist yet, the function should not exist yet.
+- **No partial implementations that paper over missing logic.** A half-implemented memory allocator is worse than no memory allocator — it creates a false sense of safety.
+- **Stubs in userland are acceptable** when clearly marked and gated behind feature flags. The kernel gets no such leniency.
+- **If it's not done, don't ship it.** Remove unfinished code rather than committing it behind a "will finish later" comment.
+
+**Rationale:** In kernel space, every code path can be reached by hardware interrupts, syscalls, or error conditions. A stub that returns `0` instead of actually handling a page fault will crash the system or create a security hole. The kernel is the foundation — there is no safety net beneath it.
+
 ---
 
 ## 5. System Architecture Overview
@@ -224,6 +240,7 @@ The layering is intentional: each boundary is a potential security and modularit
 | Attribute       | Constraint                                              |
 | --------------- | ------------------------------------------------------- |
 | Target media    | Floppy disk image, USB thumb drive                      |
+| Architecture    | 64-bit only (no 32-bit compat layer)                    |
 | UX              | CLI-only command environment                            |
 | Purpose         | Quick operations: format, diagnose, recover, inspect    |
 | Feature scope   | Kernel + essential drivers + CLI shell + core utilities |
@@ -237,6 +254,7 @@ The layering is intentional: each boundary is a potential security and modularit
 | Attribute       | Constraint                                         |
 | --------------- | -------------------------------------------------- |
 | Target media    | Hard drive, SSD, large USB                         |
+| Architecture    | 64-bit native + built-in 32-bit compatibility      |
 | UX              | Full graphical UX (browser-like) + CLI             |
 | Purpose         | Daily-use desktop/server operating system          |
 | Feature scope   | Full kernel + all drivers + GUI + app compat + COM |
@@ -283,6 +301,42 @@ The layering is intentional: each boundary is a potential security and modularit
 - No language may cross the kernel/userland boundary except through defined syscall interfaces.
 - JSON is the sole configuration format unless a justified exception is documented.
 
+### 7.4 C Coding Style Standard
+
+All C code in the ghOSt project must follow a consistent style. This is not optional — inconsistency becomes debt.
+
+| Rule                     | Convention                                                                               |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| Indentation              | 4 spaces. No tabs.                                                                       |
+| Brace style              | Allman (opening brace on its own line) for functions. K&R (same line) for control flow.  |
+| Naming — functions       | `snake_case` (e.g., `mem_alloc_page`, `uart_write_byte`)                                 |
+| Naming — types/structs   | `PascalCase` with `_t` suffix for typedefs (e.g., `PageTable_t`, `BootInfo_t`)           |
+| Naming — macros/consts   | `UPPER_SNAKE_CASE` (e.g., `PAGE_SIZE`, `MAX_CPUS`)                                       |
+| Naming — globals         | Prefixed with `g_` (e.g., `g_kernel_heap`)                                               |
+| Naming — statics         | Prefixed with `s_` (e.g., `s_init_done`)                                                 |
+| Header guards            | `#pragma once` preferred. If include guards are needed: `GHOST_{MODULE}_{FILE}_H`        |
+| Include ordering         | 1) Project headers, 2) libc/freestanding headers, 3) third-party (if any). Alphabetized. |
+| Comments                 | `//` for inline comments. `/* */` for block/doc comments. Explain _why_, not _what_.     |
+| Line length              | 100 columns soft limit. 120 hard limit.                                                  |
+| Pointer declaration      | `type *name` (star on the name side, e.g., `void *ptr`)                                  |
+| One declaration per line | No `int a, b, c;` — each gets its own line.                                              |
+
+**Rationale:** Style consistency is not cosmetic — it reduces cognitive overhead, makes grep-based code navigation reliable, and prevents style-related merge conflicts. The conventions above are chosen for clarity in systems code, not personal preference.
+
+### 7.5 Text Encoding
+
+**UTF-8 is the canonical text encoding for ghOSt.** This is a foundational decision — retrofitting encoding is a nightmare.
+
+| Rule                         | Detail                                                                                   |
+| ---------------------------- | ---------------------------------------------------------------------------------------- |
+| Internal string encoding     | UTF-8 everywhere. Kernel APIs, configs, filenames, log output — all UTF-8.               |
+| Filesystem names             | Stored and compared as UTF-8 byte sequences.                                             |
+| Console / serial output      | ASCII subset of UTF-8 in early boot. Full UTF-8 when framebuffer font supports it.       |
+| Keyboard input               | Scancodes → keycodes → UTF-8 codepoints. Keyboard layout is configuration-driven (JSON). |
+| No UCS-2 / UTF-16 internally | Unlike Windows, ghOSt does not use wide chars internally. UTF-8 only.                    |
+| Locale / i18n                | Deferred to UX phase. Kernel is locale-agnostic. UX handles display localization.        |
+| BOM                          | Never required. Never emitted. Tolerated on input if encountered.                        |
+
 ---
 
 ## 8. Memory Discipline
@@ -311,6 +365,37 @@ ghOSt treats memory discipline as a non-negotiable engineering standard.
 - Memory layout assumptions (alignment, packing, page boundaries) must be documented near the code.
 - Ownership transfer across subsystem boundaries must be explicit in function signatures or comments.
 - Any exception to these rules must be documented with rationale in the code and in `/docs/decisions/`.
+
+### 8.4 Error Handling Conventions
+
+Error handling must be consistent across the entire codebase. Ambiguous error paths are security vulnerabilities in kernel code.
+
+| Convention            | Rule                                                                                                     |
+| --------------------- | -------------------------------------------------------------------------------------------------------- |
+| Return type           | Functions that can fail return `ghost_status_t` (or equivalent typed error enum). No bare `int` returns. |
+| Error propagation     | Errors propagate upward. Callers must check return values. Unchecked returns are defects.                |
+| Kernel panic          | Reserved for truly unrecoverable states (corrupted page tables, double fault, etc.).                     |
+| Panic severity        | Define levels: `PANIC` (halt), `OOPS` (log + attempt recovery), `WARN` (log + continue).                 |
+| Assertions            | `GHOST_ASSERT()` in debug builds for invariant checking. Compiles out in release.                        |
+| No silent failure     | Functions must never silently swallow errors. If recovery is attempted, it must be logged.               |
+| Error context         | Error returns should carry enough context to diagnose: subsystem, operation, and error code at minimum.  |
+| Cross-boundary errors | Errors crossing subsystem boundaries must be translated to the receiving subsystem's error vocabulary.   |
+
+### 8.5 Logging & Debug Infrastructure
+
+A project worked on in bursts needs to be self-explanatory when you come back. Logging is not optional.
+
+| Component          | Design                                                                                    |
+| ------------------ | ----------------------------------------------------------------------------------------- |
+| Log levels         | `PANIC`, `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE` — severity-ordered.                    |
+| Early boot output  | Serial (COM1/UART) is the primary debug channel from first instruction to framebuffer up. |
+| Kernel ring buffer | Circular in-memory log buffer for post-mortem analysis. Survives soft resets if feasible. |
+| Framebuffer log    | Once framebuffer console is available, mirror log output to screen.                       |
+| Timestamping       | All log entries include a monotonic timestamp (tick count until real clock is available). |
+| Subsystem tags     | Every log line is tagged with its source subsystem (e.g., `[MM]`, `[SCHED]`, `[USB]`).    |
+| Crash dump         | On panic: dump registers, stack trace, last N log entries to serial and screen.           |
+| Debug build extras | In debug builds: verbose logging, memory poisoning, stack canaries, assertion checks.     |
+| Release build      | `INFO` and above only. No `DEBUG`/`TRACE` in release binaries.                            |
 
 ---
 
@@ -363,10 +448,11 @@ ghOSt assumes the following threat landscape:
 ### 10.2 Privacy Principles
 
 - **No telemetry, no exceptions.** The OS never transmits data without explicit user action.
-- **No mandatory accounts.** The OS is fully functional without any online identity.
+- **No mandatory accounts.** The OS is fully functional without any online identity. **Local accounts only** — no cloud accounts required for any OS functionality.
 - **No age verification.** The OS does not implement or enforce age-gating mechanisms.
 - **Local-first.** All core functionality works offline.
 - **User-owned encryption.** Keys are generated and stored locally. The OS has no backdoor access.
+- **Local AI only by default.** Any AI features run locally on-device. Cloud AI services are never enabled by default and require explicit user setup. The OS ships no cloud AI integrations out of the box.
 
 ### 10.3 Security Design Rules
 
@@ -375,6 +461,34 @@ ghOSt assumes the following threat landscape:
 - Least-privilege is the default for all access — escalation must be explicit.
 - Compliance-sensitive controls (if any) must be modular, policy-driven, and **never hardcoded into the kernel**.
 - Security-critical code paths must be minimal, auditable, and separately reviewable.
+
+### 10.4 User & Permission Model
+
+The user/permission architecture must be defined before userland exists. Retrofitting permissions is a security disaster.
+
+| Decision               | Current position                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------- |
+| Root / superuser       | A privileged account exists for system administration. Day-to-day use is non-privileged.    |
+| Permission model       | Capability-based or traditional UNIX-style — **decision needed (ADR required).**            |
+| Local accounts only    | No cloud/network accounts. All accounts are local to the machine.                           |
+| Account creation       | First boot creates a user account. No mandatory online registration.                        |
+| Privilege escalation   | Explicit and auditable. Equivalent to `sudo` — no ambient authority.                        |
+| Application sandboxing | Applications run with minimal privileges by default. Elevated access requires user consent. |
+| Service accounts       | System services run under dedicated low-privilege accounts, not root.                       |
+
+### 10.5 Disk Encryption Architecture
+
+ghOSt's privacy promise requires encryption to be a first-class architectural concern, not a bolt-on.
+
+| Decision                   | Current position                                                                        |
+| -------------------------- | --------------------------------------------------------------------------------------- |
+| Full-disk encryption (FDE) | Planned. Design must accommodate FDE from early filesystem work. **ADR required.**      |
+| Partition encryption       | Supported as alternative to FDE for multi-boot scenarios.                               |
+| Key storage                | Keys are user-owned, locally stored. No escrow, no cloud backup of keys by default.     |
+| Key derivation             | Password-based (PBKDF2 / Argon2) with optional hardware token (TPM, USB key) in future. |
+| Encryption algorithm       | AES-256 (or equivalent audited algorithm) — **decision needed when implemented.**       |
+| Boot unlock flow           | Password prompt at boot (pre-kernel or early-kernel). Must work without GUI.            |
+| Recovery                   | User-created recovery key. OS cannot recover data without user's key. No backdoors.     |
 
 ---
 
@@ -418,13 +532,113 @@ The ghOSt graphical UX is a browser-like environment:
 - Native rendering layer: **C++**
 - UX content and customization: **HTML / CSS / JS / TS**
 - Extension/theme surfaces: configuration-driven, documented APIs.
+- **GPU acceleration:** The UX compositor and rendering pipeline must leverage GPU hardware where available for compositing, 2D/3D effects, and graphics-heavy operations (e.g., animated gradient desktop backgrounds, window transitions, transparency). Software rendering is the fallback when no supported GPU driver is loaded.
 
-### 12.3 UX Design Rules
+### 12.3 Theme Architecture
+
+**Default theme: Dark Mode.** Light mode is a supported alternative, not the default.
+
+All visual styling is driven by a theme system — no colors, fonts, spacing, or icon sets may be hardcoded in rendering code.
+
+| Principle            | Detail                                                                        |
+| -------------------- | ----------------------------------------------------------------------------- |
+| Theme format         | JSON manifest + CSS variables (or equivalent token system)                    |
+| Default theme        | Dark mode, ships with the OS                                                  |
+| Bundled alternatives | At minimum: one dark theme (default) and one light theme                      |
+| Custom themes        | Users can create, install, and share themes as standalone packages            |
+| Hot-swap             | Theme changes apply without reboot or UX restart where feasible               |
+| Fallback             | If a theme file is missing or corrupt, fall back to the built-in dark default |
+| No hardcoded colors  | Rendering code references theme tokens, never literal color values            |
+| Schema versioning    | Theme format includes a `schemaVersion` for forward compatibility             |
+
+Theme scope covers at minimum:
+
+- Window chrome (title bars, borders, controls)
+- Shell surfaces (taskbar, launcher, menus)
+- System dialogs and notifications
+- Text rendering defaults (font family, size, weight)
+- Icon set / icon theme
+- Accent / highlight color
+- Scrollbars, inputs, selection highlights
+
+### 12.4 GPU-Accelerated Rendering
+
+The UX layer is designed for a modern, visually rich experience. GPU acceleration is a first-class concern, not an afterthought.
+
+| Principle               | Detail                                                                                               |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- |
+| Compositor acceleration | Window compositing uses GPU when available — alpha blending, Z-order, damage regions                 |
+| 2D effects              | Gradients, shadows, rounded corners, blur rendered via GPU pipeline                                  |
+| Animated backgrounds    | Desktop backgrounds support animated gradients and shader-driven visuals (GPU-required feature)      |
+| Transitions/animations  | Window open/close, workspace switch, and UI transitions are GPU-accelerated where supported          |
+| Software fallback       | Every GPU-accelerated path must have a software-rendered fallback (GOP framebuffer)                  |
+| Progressive enhancement | UX degrades gracefully — core usability never depends on GPU acceleration                            |
+| Driver dependency       | GPU features activate dynamically based on loaded driver capabilities (no hardcoded GPU assumptions) |
+| Frame budget            | Target 60 fps for composited desktop; drop effects before dropping frames                            |
+
+### 12.5 UX Design Rules
 
 - Separate rendering/input/runtime from policy/config.
 - Keep customization surfaces intentional and documented.
 - Never embed policy decisions (censorship, content filtering, access restrictions) in the UX layer.
 - UX must work without network access (local-first).
+- GPU-accelerated features must gracefully degrade to software rendering when GPU is unavailable.
+
+### 12.6 Accessibility (a11y)
+
+Accessibility cannot be retrofitted. The UX architecture must include a11y hooks from day one.
+
+| Requirement               | Status                                                                           |
+| ------------------------- | -------------------------------------------------------------------------------- |
+| Keyboard-only navigation  | **Required.** Every UX function must be reachable without a mouse.               |
+| High-contrast mode        | **Required.** Shipped as a bundled theme variant.                                |
+| Screen reader support     | **Planned.** UX widgets must expose semantic information (role, label, state).   |
+| Font scaling / large text | **Required.** System-wide font scale setting in config.                          |
+| Reduced motion            | **Planned.** Config flag to suppress animations and transitions.                 |
+| Color-blind safe defaults | **Planned.** Default themes must be tested for common color vision deficiencies. |
+
+Accessibility is not a feature gate — it is a property of the UX architecture. Building a compositor without a11y hooks creates permanent debt.
+
+### 12.7 Multi-Monitor & HiDPI
+
+| Decision                | Current position                                                                                     |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- |
+| Multi-monitor           | **Planned.** Compositor must model multiple outputs from the start. Per-output mode setting and DPI. |
+| HiDPI / display scaling | **Planned.** Integer scaling (2x, 3x) first. Fractional scaling is deferred.                         |
+| Per-monitor DPI         | Design for it now. Each monitor has its own scale factor.                                            |
+| Primary display         | Configurable. No hardcoded "monitor 0 is primary" assumption.                                        |
+
+### 12.8 Notification System
+
+| Decision                    | Current position                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------ |
+| Kernel → user notifications | Events (disk full, hardware error, OOM) delivered via IPC to a notification service. |
+| App → user notifications    | Applications use a notification API with user-controllable permissions.              |
+| CLI profile                 | Notifications print to console/serial. No daemon required.                           |
+| GUI profile                 | Toast-style notification popups. Notification center is a UX feature.                |
+| Do Not Disturb              | Config-driven. User can suppress non-critical notifications.                         |
+
+### 12.9 Font Rendering
+
+| Decision           | Current position                                                                 |
+| ------------------ | -------------------------------------------------------------------------------- |
+| Font engine        | **Decision needed (ADR).** Candidates: FreeType, stb_truetype, custom.           |
+| Hinting            | Must support hinting for legibility at small sizes.                              |
+| Subpixel rendering | Planned for LCD displays. Must be configurable (some displays don't benefit).    |
+| Default font       | Ship at least one high-quality open-source font (e.g., Noto, Inter, or similar). |
+| Bitmap fallback    | Early boot uses a simple bitmap font. No TrueType dependency in kernel.          |
+
+### 12.10 Deferred UX Items (Documented for Future)
+
+These are acknowledged as real requirements but are explicitly deferred beyond initial GUI delivery:
+
+| Item                       | Status   | Notes                                                              |
+| -------------------------- | -------- | ------------------------------------------------------------------ |
+| Printing support           | Deferred | Printers exist but driver complexity is enormous. Not in v1.       |
+| Clipboard / drag-and-drop  | Deferred | Requires IPC + MIME type system. Phase 10+.                        |
+| Backup / restore           | Deferred | Local backup tool planned. Cloud backup never by default.          |
+| Branding / visual identity | Deferred | Logo, boot splash, icon set direction — not urgent.                |
+| End-user documentation     | Deferred | Install guide, user manual, troubleshooting. Needed before v1.0.0. |
 
 ---
 
@@ -435,14 +649,49 @@ The ghOSt graphical UX is a browser-like environment:
 - ghOSt will define its own native application interface (syscall + userland API surface).
 - Native apps are written in C, C++, or web technologies (HTML/CSS/JS/TS via the UX runtime).
 
-### 13.2 COM Support (Full Install, Long-Term)
+### 13.2 ABI Stability Policy
+
+The syscall interface is the contract between the kernel and userland. Breaking it silently destroys all user-space software.
+
+| Phase    | ABI policy                                                                                 |
+| -------- | ------------------------------------------------------------------------------------------ |
+| `0.x.y`  | **Unstable.** Syscall numbers, signatures, and behavior may change between any release.    |
+| `1.0.0`  | **Stable baseline.** Syscall ABI is frozen. Breaking changes require a major version bump. |
+| Post-1.0 | New syscalls can be added (minor bump). Existing syscalls cannot change behavior.          |
+
+- ABI stability applies to the syscall boundary only. Internal kernel APIs are always subject to change.
+- The UX shell and userland libraries must version-check the kernel at startup and fail clearly on mismatch.
+
+### 13.3 Process Lifecycle & Init System
+
+The process model must be designed before userland exists. It shapes everything from shell to services.
+
+| Decision           | Current position                                                                      |
+| ------------------ | ------------------------------------------------------------------------------------- |
+| Init / PID 1       | ghOSt will have its own init system (not systemd, not SysV). **ADR required.**        |
+| Process hierarchy  | Parent-child. Orphaned processes are re-parented to init.                             |
+| Service management | Config-driven service definitions (JSON). Start/stop/restart/dependency ordering.     |
+| Daemon lifecycle   | Services declare dependencies and are started in dependency order by init.            |
+| Zombie handling    | Kernel automatically reaps zombies whose parent has exited.                           |
+| Shutdown sequence  | Init drives orderly shutdown: stop services → sync filesystems → unmount → power off. |
+
+### 13.4 COM Support (Full Install, Long-Term)
 
 - Full COM (Component Object Model) support is a planned major milestone for the Full Install Profile.
 - This requires implementing: COM runtime, interface marshaling, class factories, registry/activation model, threading apartments, and selected OLE/ActiveX surfaces.
+- COM must work for both 64-bit native and 32-bit applications (via the 32-bit compatibility subsystem).
 - COM is explicitly **out of scope for Minimal Rescue Profile**.
 - Approach: phased implementation — core runtime first, then interface coverage expands based on target application needs.
 
-### 13.3 Third-Party Application Strategy
+### 13.5 32-Bit Compatibility Subsystem (Full Install)
+
+- ghOSt is a 64-bit OS. 32-bit application support is provided through a dedicated compatibility subsystem built into the Full Install Profile.
+- The subsystem intercepts and translates 32-bit syscalls, manages separate 32-bit address spaces, and provides thunking for API/COM interop between 32-bit and 64-bit components.
+- This subsystem is **not** called "WoW" or any Windows-derived name. A ghOSt-native name will be chosen (tracked as an open question).
+- The 32-bit compatibility layer is **excluded from the Minimal Rescue Profile** to preserve size and simplicity.
+- Design must keep the compatibility boundary explicit: 32-bit code runs in a well-defined sandbox with clear transitions to/from 64-bit services.
+
+### 13.6 Third-Party Application Strategy
 
 - **Phase 1:** Native ghOSt applications + web applications.
 - **Phase 2:** COM runtime enables selected Windows-ecosystem applications.
@@ -496,9 +745,477 @@ The ghOSt graphical UX is a browser-like environment:
 - Prefer no external dependencies in kernel space.
 - Userland dependencies must not compromise the privacy or security posture.
 
+### 15.4 Testing Strategy
+
+An OS project worked on in bursts needs automated tests as a safety net. When you come back after weeks or months, tests tell you what still works.
+
+| Layer             | Approach                                                                                           |
+| ----------------- | -------------------------------------------------------------------------------------------------- |
+| Unit tests        | Test individual functions (memory allocator, string ops, data structures) in a hosted environment  |
+| Test framework    | Lightweight C test framework (candidates: Unity, CMocka, or custom minimal). **ADR required.**     |
+| Integration tests | Test subsystem interactions (e.g., VFS + filesystem, scheduler + IPC) in QEMU                      |
+| Boot smoke test   | Automated: build image → boot in QEMU → verify serial output for expected sign-of-life strings     |
+| Regression tests  | Every bug fix adds a test that reproduces the bug. No fix without a test.                          |
+| Test location     | Test code lives adjacent to the code it tests: `kernel/mm/tests/`, `kernel/sched/tests/`, etc.     |
+| Debug vs release  | Debug builds enable assertion checks, memory poisoning, stack canaries. Release builds strip them. |
+| Hardware tests    | Manual on real hardware before milestone releases. Automated testing is QEMU-only.                 |
+
+### 15.5 CI Pipeline
+
+Continuous integration catches regressions between work sessions. This is non-negotiable for a burst-schedule project.
+
+| Stage                 | What it does                                                                   |
+| --------------------- | ------------------------------------------------------------------------------ |
+| Build (both profiles) | Cross-compile Minimal Rescue and Full Install images. Must succeed cleanly.    |
+| Static analysis       | Run with `-Wall -Wextra -Werror`. Additional checks (cppcheck, etc.) optional. |
+| Unit tests            | Run all unit tests in hosted environment.                                      |
+| Boot smoke test       | Boot the Minimal Rescue image in QEMU, verify serial output.                   |
+| Image size check      | Fail if Minimal Rescue image exceeds size budget.                              |
+| Changelog check       | Warn if version was bumped without a CHANGELOG.md entry (optional gate).       |
+
+**Platform:** GitHub Actions (free for public repos). Pipeline config lives in `/.github/workflows/`.
+**Goal:** Every push to `main` must pass all CI stages. Broken main is not acceptable.
+
 ---
 
-## 16. Decision Records
+## 16. Versioning Architecture
+
+ghOSt uses **OS-style versioning**, not semantic versioning (semver). The kernel/OS and the GUI/UX shell are versioned on **separate tracks** because the kernel is built first — it is the core, the foundation. The UX comes later, much later. Their version numbers will never be in lockstep.
+
+> We build the highways first before the traffic comes.
+
+The kernel will have many releases before the UX shell even exists. Forcing them onto a single version track would either leave the UX at an absurdly high number on day one, or artificially hold back kernel versioning while waiting for UX to catch up. Neither is acceptable.
+
+### 16.1 Kernel / OS Version
+
+The kernel and core OS follow a `MAJOR.MINOR.PATCH` scheme inspired by traditional OS and Linux kernel versioning:
+
+| Component | Meaning                                                                                                        |
+| --------- | -------------------------------------------------------------------------------------------------------------- |
+| **MAJOR** | Fundamental architecture change, ABI break, or generational milestone (e.g., `0` → `1` = first public release) |
+| **MINOR** | Feature release — new subsystem, driver, or significant capability added                                       |
+| **PATCH** | Bug fix, security fix, or trivial improvement with no feature change                                           |
+
+**Example progression:** `0.0.1` → `0.0.2` → `0.1.0` → `0.2.0` → `1.0.0`
+
+**Rules:**
+
+- Every kernel build **must** carry a version number. Unversioned builds are not permitted.
+- The version is embedded in the kernel binary at build time (compile-time constant or build-generated header).
+- The version is printed on boot (serial + framebuffer console).
+- The version is queryable at runtime via syscall (for userland and UX to read).
+- `CHANGELOG.md` must be updated with every version bump — no silent increments.
+- Version `0.x.y` denotes pre-release. Version `1.0.0` is the first stable public release.
+
+### 16.2 GUI / UX Shell Version
+
+The graphical shell is versioned **independently** from the kernel because:
+
+- **The kernel is the core and gets built first.** It will go through many versions before any UX exists.
+- The UX may receive visual/feature updates without kernel changes.
+- The kernel may receive driver/security patches without UX changes.
+- Decoupled versioning prevents forced lockstep releases.
+- The UX version will start at `0.0.1` whenever the shell is first delivered, regardless of where the kernel version stands at that point.
+
+The UX shell uses the same `MAJOR.MINOR.PATCH` format but on its own track:
+
+| Component | Meaning                                                                |
+| --------- | ---------------------------------------------------------------------- |
+| **MAJOR** | UX engine rewrite, rendering pipeline change, or breaking theme schema |
+| **MINOR** | New UX feature, visual overhaul, or new default capability             |
+| **PATCH** | Bug fix, theme fix, or minor visual correction                         |
+
+**Rules:**
+
+- UX version is stored in UX configuration and displayed in the **System → Help → About** dialog.
+- The About dialog must show **both** the kernel/OS version and the UX shell version.
+- UX version changes are tracked in `CHANGELOG.md` under a separate section from kernel changes.
+
+### 16.3 Version Display (About Dialog)
+
+When the GUI reaches maturity, the **System → Help → About** (or equivalent) panel must display:
+
+| Field            | Source                        |
+| ---------------- | ----------------------------- |
+| OS name          | ghOSt                         |
+| Kernel version   | Embedded in kernel binary     |
+| UX shell version | From UX config / shell binary |
+| Build date       | Compile-time timestamp        |
+| Architecture     | x86-64 (runtime query)        |
+| Profile          | Full Install / Minimal Rescue |
+
+### 16.4 Version Tracking Discipline
+
+Forgetting to version a build causes confusion and makes debugging impossible. These safeguards are mandatory:
+
+| Safeguard                    | Detail                                                                                   |
+| ---------------------------- | ---------------------------------------------------------------------------------------- |
+| Build-time version injection | Version is injected by the build system, not manually edited in source                   |
+| Version header/constant      | Single source of truth: `VERSION_MAJOR`, `VERSION_MINOR`, `VERSION_PATCH` in one file    |
+| Boot banner                  | Kernel prints version on every boot (serial + console)                                   |
+| Build system check           | Build fails if version has not been incremented since the last tagged release (optional) |
+| Changelog enforcement        | Every version bump requires a corresponding `CHANGELOG.md` entry                         |
+| Git tags                     | Every release version is tagged in git: `v0.1.0`, `vUX-0.1.0`, etc.                      |
+| Pre-release label            | Builds from untagged commits append `-dev` suffix (e.g., `0.1.0-dev`)                    |
+
+### 16.5 Git Tag Convention
+
+| Tag format       | Meaning             | Example      |
+| ---------------- | ------------------- | ------------ |
+| `v{X.Y.Z}`       | Kernel / OS release | `v0.1.0`     |
+| `vUX-{X.Y.Z}`    | UX shell release    | `vUX-0.1.0`  |
+| `v{X.Y.Z}-rc{N}` | Release candidate   | `v0.1.0-rc1` |
+
+---
+
+## 17. Development Roadmap
+
+Building an OS from scratch is one of the hardest software engineering undertakings possible. This roadmap exists to make the path honest, visible, and sequential. Each phase has hard prerequisites — skipping phases creates debt that compounds.
+
+### 17.1 Phase 0: Toolchain & Development Environment
+
+**Goal:** Be able to compile, link, and produce bootable artifacts before writing any OS code.
+
+| Task               | Detail                                                                                       | Hard Problems                                                     |
+| ------------------ | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Cross-compiler     | Build or configure a GCC/Clang cross-compiler targeting x86-64 freestanding (no hosted libc) | Toolchain version pinning, reproducibility                        |
+| Assembler          | NASM or GNU as for Assembly sources                                                          | Syntax choice (Intel vs AT&T) — decide once                       |
+| Linker scripts     | Custom linker scripts for kernel binary layout                                               | Getting sections, alignment, and entry point right                |
+| Build system       | Makefile or CMake for reproducible builds                                                    | Must support Minimal Rescue and Full Install targets from day one |
+| Boot image tooling | Scripts to produce FAT32-formatted UEFI-bootable images (.img)                               | Image layout, partition tables, ESP structure                     |
+| Emulator/debugger  | QEMU + OVMF (UEFI firmware) for testing without real hardware                                | GDB remote debug integration for kernel                           |
+| CI pipeline        | Automated build + boot-smoke-test (future)                                                   | Reproducible across machines                                      |
+
+**Exit criteria:** Can produce a bootable `.img` that QEMU/OVMF loads and shows a sign-of-life (e.g., colored screen or serial output).
+
+---
+
+### 17.2 Phase 1: UEFI Bootloader
+
+**Goal:** A working UEFI application that gains control from firmware and prepares to hand off to the kernel.
+
+| Task                   | Detail                                                       | Hard Problems                                                                    |
+| ---------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| UEFI application entry | Write a minimal UEFI app (`.efi` binary) loaded by firmware  | Understanding UEFI calling conventions, PE32+ format                             |
+| GOP framebuffer        | Acquire Graphics Output Protocol for basic pixel output      | Mode selection, fallback if preferred mode unavailable                           |
+| Memory map             | Call `GetMemoryMap()` to understand available RAM            | Memory map is volatile — must be re-read immediately before `ExitBootServices()` |
+| `ExitBootServices()`   | Transition from UEFI boot services to OS-controlled runtime  | This is the point of no return — firmware memory may be reclaimed                |
+| Load kernel            | Load kernel binary from filesystem on boot media into memory | Need a minimal FAT32 reader or use UEFI file protocol                            |
+| Handoff structure      | Pass memory map, framebuffer info, and boot config to kernel | Define a clean boot-info struct — this is an API boundary                        |
+
+**Key decision needed:** Use GNU-EFI, POSIX-UEFI, EDK2, or write UEFI interaction from scratch?
+
+**Exit criteria:** UEFI app loads, gets framebuffer + memory map, loads kernel blob, jumps to kernel entry.
+
+---
+
+### 17.3 Phase 2: Kernel Fundamentals
+
+**Goal:** A working 64-bit kernel that controls the CPU and memory.
+
+| Task                    | Detail                                                                                      | Hard Problems                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| Entry point (Assembly)  | Kernel entry in long mode, set up initial stack                                             | Must already be in 64-bit mode from UEFI                        |
+| GDT                     | Set up Global Descriptor Table for 64-bit flat model                                        | Segments are mostly flat in long mode but GDT is still required |
+| IDT + ISRs              | Interrupt Descriptor Table, exception handlers (divide-by-zero, page fault, GP fault, etc.) | Getting ISR stubs right in Assembly, stack frame conventions    |
+| PIC / APIC              | Program interrupt controller(s) for hardware interrupts                                     | Legacy PIC vs APIC/x2APIC detection and init                    |
+| Physical memory manager | Parse UEFI memory map, build a physical page allocator (bitmap or free-list)                | Handling reserved/ACPI/firmware regions correctly               |
+| Virtual memory manager  | Set up kernel page tables, implement `map_page()` / `unmap_page()`                          | Recursive page tables or direct-map approach; TLB management    |
+| Heap allocator          | Simple kernel heap (slab, bump, or buddy) for dynamic kernel allocations                    | Fragmentation, determinism, debug-mode poisoning                |
+| Serial/UART output      | Early debug output via COM1 serial port                                                     | Essential for debugging before framebuffer console works        |
+| Framebuffer console     | Text rendering to GOP framebuffer (simple bitmap font)                                      | Font rendering, scrolling, cursor — keep minimal                |
+| Kernel panic handler    | Catch unrecoverable errors, dump register state, halt                                       | Must work even if most subsystems are broken                    |
+
+**Exit criteria:** Kernel boots, handles exceptions, allocates memory, prints text to screen and serial.
+
+---
+
+### 17.4 Phase 3: Core Kernel Services
+
+**Goal:** Scheduling, IPC, and the syscall boundary that makes userland possible.
+
+| Task                            | Detail                                                                 | Hard Problems                                                       |
+| ------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Timer (PIT / HPET / APIC timer) | Reliable tick source for preemptive scheduling                         | Calibration differences across hardware                             |
+| Thread/process model            | Kernel threads first, then user processes with separate address spaces | Context switching in Assembly, saving/restoring full CPU state      |
+| Scheduler                       | Simple round-robin or priority scheduler                               | Avoiding priority inversion, idle task, timer-driven preemption     |
+| Syscall interface               | `SYSCALL`/`SYSRET` (x86-64 fast syscall)                               | MSR setup, register conventions, security of user-supplied pointers |
+| User-mode entry                 | Load and execute a user-mode ELF binary                                | ELF loader, user-space stack setup, ring-3 transition               |
+| IPC                             | Basic message passing or shared memory                                 | Synchronization primitives (mutexes, semaphores) in kernel          |
+| Signals / events                | Mechanism for kernel-to-process and process-to-process notifications   | Signal delivery during syscalls, reentrancy                         |
+
+**Exit criteria:** Kernel can launch a userland process, preempt it, and handle syscalls from it.
+
+---
+
+### 17.5 Phase 4: Storage & Filesystem
+
+**Goal:** Read and write persistent storage. This is required before any useful OS operations.
+
+| Task            | Detail                                                            | Hard Problems                                              |
+| --------------- | ----------------------------------------------------------------- | ---------------------------------------------------------- |
+| AHCI driver     | SATA controller driver for hard drives/SSDs                       | PCI enumeration first, AHCI register interface, DMA        |
+| NVMe driver     | NVMe controller for modern SSDs                                   | Submission/completion queue model, PCIe config space       |
+| Partition table | GPT parsing (UEFI standard)                                       | Protective MBR, GUID handling                              |
+| VFS layer       | Virtual Filesystem Switch — abstraction over concrete filesystems | Inode/dentry model, mount points, path resolution          |
+| FAT32 driver    | Required for UEFI ESP and basic interop                           | Long filename support, cluster chaining, edge cases        |
+| Ext2/custom FS  | A real filesystem for the root partition                          | Journal (ext3/4) adds complexity — ext2 is a simpler start |
+| Block cache     | Cache disk blocks in memory                                       | Cache coherency, write-back vs write-through               |
+
+**Exit criteria:** Kernel can mount a root filesystem, read files, and write files.
+
+---
+
+### 17.6 Phase 5: Essential Hardware Drivers
+
+**Goal:** The minimum driver set to make the system usable on real hardware.
+
+This is one of the hardest areas. Unlike Linux (which has thousands of contributors writing drivers), ghOSt must be strategic.
+
+| Driver class             | Initial approach                                                                 | Hard Problems                                                              |
+| ------------------------ | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| **USB (xHCI)**           | xHCI host controller driver — covers USB 3.x and backward compat                 | xHCI spec is ~700 pages; ring buffers, TRBs, device enumeration            |
+| **USB HID**              | Keyboard + mouse via USB HID class driver                                        | HID report descriptor parsing, boot protocol fallback                      |
+| **PS/2 fallback**        | PS/2 keyboard/mouse for legacy and VM support                                    | Simple but still needed for QEMU/older hardware                            |
+| **PCI/PCIe enumeration** | Scan PCI bus, identify devices, allocate BARs                                    | Foundation for all PCI-based drivers (AHCI, NVMe, USB, GPU, NIC)           |
+| **ACPI**                 | Parse ACPI tables (RSDP → RSDT/XSDT → MADT, FADT, etc.)                          | Required for SMP, power management, interrupt routing                      |
+| **Framebuffer (GOP)**    | Use UEFI GOP framebuffer passed at boot                                          | No hardware acceleration — just pixel pushing. Sufficient for early stages |
+| **Real GPU driver**      | This is the elephant in the room (see below)                                     | **Extremely hard. Deferred to later phase.**                               |
+| **Audio**                | Basic HDA (High Definition Audio) controller                                     | HDA codec discovery, stream management, buffer DMA                         |
+| **Network (NIC)**        | Start with one well-documented NIC family (e.g., Intel e1000/i210 or virtio-net) | Ring buffers, DMA, interrupt coalescing                                    |
+| **RTC**                  | Real-time clock for timekeeping                                                  | CMOS access, BCD conversion                                                |
+
+#### The GPU Driver Problem (Honest Assessment)
+
+Modern GPU drivers are among the most complex software ever written. AMD's open-source Linux driver is ~3 million lines. NVIDIA's is proprietary. Intel's is ~1.5 million lines.
+
+**ghOSt's realistic GPU strategy:**
+
+1. **Phase 1 (now):** UEFI GOP framebuffer only. Software rendering. No acceleration.
+2. **Phase 2:** Basic VESA/GOP mode switching. Simple 2D compositor for the GUI shell.
+3. **Phase 3:** Target one GPU family with open documentation (likely AMD — they publish open-source register specs). Implement basic modesetting + 2D acceleration.
+4. **Phase 4 (long-term):** Evaluate porting/adapting Mesa or writing a minimal Vulkan/OpenGL path.
+5. **Fallback:** For GPUs we don't support, the system falls back to GOP framebuffer (functional but slow).
+
+This is a multi-year problem. The GUI UX must be designed to work acceptably on a software-rendered framebuffer first.
+
+#### The Audio Driver Problem
+
+HDA (High Definition Audio) is the dominant audio interface on PC hardware. The spec is publicly available (Intel HDA specification). It's complex but achievable:
+
+- Codec discovery and initialization
+- Stream descriptor setup (output/input)
+- DMA buffer management
+- Mixer/volume control
+
+A basic "play PCM audio" driver is a realistic early target. Full mixer/multi-stream support comes later.
+
+#### Driver Strategy Summary
+
+| Priority                | Driver                                                                   | Reason                                 |
+| ----------------------- | ------------------------------------------------------------------------ | -------------------------------------- |
+| P0 — Must have          | PCI enumeration, PS/2 keyboard, framebuffer console, serial, timer, AHCI | Can't function without these           |
+| P1 — Boot-critical      | USB (xHCI), USB HID, GPT/FAT32, memory management                        | Required for real hardware support     |
+| P2 — Core functionality | NVMe, ext2/custom FS, NIC (one family), ACPI, RTC                        | Required for Full Install to be useful |
+| P3 — Full experience    | HDA audio, 2D GPU accel, additional NIC families, advanced USB classes   | Required for daily-use OS              |
+| P4 — Long-term          | 3D GPU acceleration, Bluetooth, WiFi, webcam, advanced power management  | Hard, specialized, long timeline       |
+
+---
+
+### 17.7 Phase 6: Userland Foundation
+
+**Goal:** A usable userland environment before any GUI work.
+
+| Task                | Detail                                                                                     | Hard Problems                                                 |
+| ------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| C runtime (libc)    | Minimal freestanding libc: `string.h`, `stdio.h` (serial/framebuffer), `stdlib.h`, `errno` | Deciding scope — full POSIX or ghOSt-native subset?           |
+| ELF loader          | Load and execute ELF64 binaries from filesystem                                            | Dynamic linking (deferred), relocations, `mmap`-style loading |
+| Shell (CLI)         | Command-line interpreter: parse input, launch programs, built-in commands                  | Job control, piping, environment variables (phased)           |
+| Core utilities      | `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `mount`, `format`, `echo`, `clear`, etc.           | Each one exercises different syscalls — good test surface     |
+| Dynamic linker      | `ld.so` equivalent for shared libraries                                                    | Symbol resolution, lazy binding, position-independent code    |
+| `/dev` device model | Device nodes for accessing drivers from userland                                           | Device registration, major/minor numbers or name-based        |
+
+**Exit criteria:** Can boot to a CLI shell, navigate filesystem, run simple programs. This is the Minimal Rescue Profile milestone.
+
+---
+
+### 17.8 Phase 7: Preinstallation Environment (ghOSt PE)
+
+**Goal:** A bootable environment that can install the Full Install Profile onto a target disk.
+
+| Task                     | Detail                                                            | Hard Problems                                             |
+| ------------------------ | ----------------------------------------------------------------- | --------------------------------------------------------- |
+| Bootable PE image        | Minimal bootable image (USB/network) containing installer         | Must fit comfortably on USB; shares Minimal Rescue kernel |
+| Disk partitioning        | Create GPT partition table, ESP, root partition                   | Safe handling of existing partition tables                |
+| Filesystem formatting    | Format partitions (FAT32 for ESP, ext2/custom for root)           | On-disk layout correctness at format time                 |
+| File copy engine         | Copy OS files from install media to target disk                   | Progress feedback, error handling, verification           |
+| Boot entry setup         | Write UEFI boot entry for installed system                        | UEFI NVRAM variables or fallback boot path                |
+| Configuration wizard     | Minimal text-mode setup: hostname, locale, timezone, user account | Keep it simple — no GUI needed                            |
+| Network install (future) | Pull install image over network                                   | Requires network stack — deferred                         |
+
+**Relationship to Minimal Rescue:** ghOSt PE can share most of the Minimal Rescue Profile infrastructure. The installer is essentially a specialized program running on the Rescue environment.
+
+**Exit criteria:** Can boot PE media, partition a disk, install ghOSt, reboot into installed system.
+
+---
+
+### 17.9 Phase 8: Boot Manager
+
+**Goal:** A proper boot manager that handles boot selection, recovery, and multi-boot.
+
+| Task                             | Detail                                                              | Hard Problems                                                          |
+| -------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Boot menu                        | Select between: Full Install, Minimal Rescue, recovery mode         | Timeout, keyboard input at UEFI or early-kernel stage                  |
+| Boot configuration               | JSON config on ESP defining boot entries and defaults               | Config validation at boot time with minimal code                       |
+| Recovery mode                    | Boot into Minimal Rescue from installed system's recovery partition | Must work even if Full Install is broken                               |
+| Chainloading                     | Optionally chainload other OS bootloaders for multi-boot            | UEFI makes this easier than legacy BIOS — use `LoadImage`/`StartImage` |
+| Secure Boot integration (future) | Sign bootloader and kernel for Secure Boot chains                   | Requires key enrollment, signing infrastructure                        |
+
+**Exit criteria:** Boot manager presents menu, can boot Full Install or Rescue, recovery works from installed disk.
+
+---
+
+### 17.10 Phase 9: Networking Stack
+
+**Goal:** TCP/IP networking for the Full Install Profile.
+
+| Task             | Detail                                     | Hard Problems                                                         |
+| ---------------- | ------------------------------------------ | --------------------------------------------------------------------- |
+| NIC driver(s)    | At least one real NIC + virtio-net for VMs | See driver section above                                              |
+| Ethernet framing | Send/receive Ethernet frames               | MAC addressing, MTU handling                                          |
+| ARP              | Address Resolution Protocol                | Cache management, timeout                                             |
+| IP (v4 first)    | Packet routing, fragmentation/reassembly   | Routing table, localhost, checksum                                    |
+| ICMP             | Ping, error messages                       | Useful for diagnostics from day one                                   |
+| UDP              | Connectionless datagrams                   | Port multiplexing, DNS depends on this                                |
+| TCP              | Connection-oriented reliable stream        | State machine (SYN/ACK/FIN), retransmission, windowing — this is hard |
+| DNS resolver     | Hostname resolution                        | Stub resolver is sufficient initially                                 |
+| DHCP client      | Auto-configure IP address                  | Lease management, renewal                                             |
+| Sockets API      | Userland interface to networking           | BSD sockets or ghOSt-native?                                          |
+| TLS (future)     | Encrypted connections                      | Crypto library dependency, certificate handling — big effort          |
+
+**Exit criteria:** Can ping, resolve DNS, make TCP connections, fetch data over HTTP.
+
+---
+
+### 17.11 Phase 10: GUI Compositor & Shell
+
+**Goal:** A graphical desktop environment. This is the point where ghOSt becomes a "real desktop OS."
+
+**Prerequisites:** Working framebuffer, mouse input, keyboard input, filesystem, userland, IPC.
+
+| Task                       | Detail                                                            | Hard Problems                                       |
+| -------------------------- | ----------------------------------------------------------------- | --------------------------------------------------- |
+| Window compositor          | Manage window buffers, Z-order, compositing, damage tracking      | Performance with software rendering, tearing        |
+| Input routing              | Deliver keyboard/mouse events to correct window                   | Focus management, input capture                     |
+| Window manager             | Placement, resize, minimize, maximize, tiling                     | Policy-driven (not hardcoded)                       |
+| Widget toolkit / rendering | Text rendering (font rasterization), basic widgets                | FreeType or custom font engine, subpixel rendering  |
+| Web-style UX runtime       | HTML/CSS/JS renderer for shell UI (or embed a lightweight engine) | This is essentially building a browser — huge scope |
+| Clipboard / DnD            | Clipboard and drag-and-drop between windows                       | IPC, MIME types, serialization                      |
+| Theming                    | JSON-driven appearance customization                              | CSS-like or direct JSON? Define early               |
+| Taskbar / launcher         | Basic application launcher and window list                        | Connects to window manager and process list         |
+
+**Realistic assessment:** A basic tiling/stacking window manager with software rendering is achievable relatively early after Phase 9. The "browser-like UX" aspiration (HTML/CSS/JS shell) is a major investment — potentially embedding or adapting an existing engine (e.g., Servo components, WebKit subset, or a custom renderer).
+
+**Exit criteria:** Can display multiple windows, switch between them, run graphical applications with keyboard/mouse input.
+
+---
+
+### 17.12 Phase 11: Application Framework & COM
+
+**Goal:** Full Install has a real application model that third-party software can target.
+
+This is where the application compatibility ambitions (COM, 32-bit compat) come together.
+
+| Task                      | Detail                                                  |
+| ------------------------- | ------------------------------------------------------- |
+| Application packaging     | Define how apps are installed, stored, and launched     |
+| Permission model          | Sandboxing, capability-based access control             |
+| COM runtime (core)        | `CoCreateInstance`, class factory, interface marshaling |
+| COM registry/activation   | Component registration and lookup                       |
+| Threading apartments      | STA/MTA model for COM threading                         |
+| 32-bit thunking layer     | Translate 32-bit syscalls and API calls to 64-bit       |
+| OLE / ActiveX (selective) | Only implement what's needed for target applications    |
+
+---
+
+### 17.13 Phase 12: Local AI Subsystem (Future)
+
+**Goal:** Provide on-device AI capabilities with zero cloud dependency by default.
+
+| Task                                   | Detail                                                                                       | Hard Problems                                                                |
+| -------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Inference runtime                      | Integrate or build a local inference engine (e.g., ONNX Runtime, llama.cpp-style, or custom) | Model format support, memory footprint, CPU vs GPU dispatch                  |
+| Model management                       | Local model storage, loading, versioning                                                     | Disk space, secure model integrity verification                              |
+| AI service API                         | Userland API for applications to request inference (text, image, embeddings, etc.)           | API surface design, sandboxing inference workloads                           |
+| Hardware acceleration                  | Leverage GPU/NPU for inference when drivers support it                                       | Depends on GPU driver maturity (Phase 5 / long-term)                         |
+| Privacy enforcement                    | All inference is local. No model phones home. No training data leaves the device.            | Auditing third-party models for telemetry, sandboxing model I/O              |
+| Cloud AI opt-in (user-configured only) | Allow user to manually configure external AI endpoints if desired                            | Clear UX consent flow, no default cloud endpoints, no bundled cloud accounts |
+
+**Rules:**
+
+- AI features are **local-only by default**. No cloud AI services ship enabled.
+- No cloud account is required, created, or suggested during setup.
+- Users may optionally configure cloud AI endpoints themselves — this is a power-user feature, not a default.
+- AI subsystem must run within the OS permission/sandboxing model.
+- Models shipped with the OS (if any) must be open-weight / redistributable.
+
+**Exit criteria:** A local inference engine runs on-device, applications can call it via a documented API, and no network traffic is generated unless the user explicitly configured a remote endpoint.
+
+---
+
+### 17.14 Phase Summary & Dependency Graph
+
+```
+Phase 0: Toolchain ──┐
+                      ▼
+Phase 1: UEFI Bootloader ──┐
+                            ▼
+Phase 2: Kernel Fundamentals ──┐
+                               ▼
+Phase 3: Core Kernel Services ──┬──────────────────┐
+                                ▼                  ▼
+Phase 4: Storage & FS    Phase 5: Essential Drivers
+         │                       │
+         └────────┬──────────────┘
+                  ▼
+Phase 6: Userland Foundation ──┐
+         │                     │
+         ▼                     ▼
+Phase 7: ghOSt PE        Phase 8: Boot Manager
+         │
+         ▼
+Phase 9: Networking ──┐
+                      ▼
+Phase 10: GUI Compositor & Shell ──┐
+                                   ▼
+Phase 11: App Framework & COM ──┐
+                                ▼
+Phase 12: Local AI Subsystem
+```
+
+````
+
+Each phase must be stable and tested before the next begins. Phases 4/5 and 7/8 can overlap internally, but their collective output is required before Phase 6 is complete.
+
+---
+
+### 17.15 Known Hard Problems (Requires Ongoing Research)
+
+| Problem             | Why it's hard                                                      | Current strategy                                                   |
+| ------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| GPU drivers         | Millions of lines for modern GPUs; specs are partially proprietary | GOP framebuffer first, then target AMD (open specs)                |
+| WiFi drivers        | Firmware blobs, complex state machines, per-chipset differences    | Deferred. Ethernet first. Evaluate open firmware chips later       |
+| Audio drivers       | HDA spec is complex; per-codec initialization varies               | Target HDA with basic PCM playback first                           |
+| USB                 | xHCI is ~700 pages of spec; per-class drivers on top               | Implement xHCI core + HID first, expand classes over time          |
+| Filesystem maturity | Data corruption is unacceptable; needs exhaustive testing          | Start with FAT32 (well-understood), then build custom FS carefully |
+| TCP/IP correctness  | Edge cases, congestion, fragmentation, security                    | Implement incrementally, test against real stacks                  |
+| Browser-like UX     | Essentially building a web engine                                  | Evaluate embedding existing tech vs custom; phased approach        |
+| Secure Boot         | Requires signing infrastructure, key management, Microsoft UEFI CA | Design-compatible now, implement later                             |
+| SMP (multi-core)    | AP startup, cache coherency, lock-free data structures             | Single-core first, SMP after scheduler is stable                   |
+
+---
+
+## 18. Decision Records
 
 All significant architecture decisions are recorded in `/docs/decisions/` using lightweight ADR format.
 
@@ -526,7 +1243,7 @@ All significant architecture decisions are recorded in `/docs/decisions/` using 
 ## Consequences
 
 [What follows from this decision — positive and negative]
-```
+````
 
 ### Rules
 
@@ -536,78 +1253,113 @@ All significant architecture decisions are recorded in `/docs/decisions/` using 
 
 ---
 
-## 17. Contribution Standards
+## 19. Contribution Standards
 
-### 17.1 Code Quality
+### 19.1 Code Quality
 
 - All kernel/boot code: C and Assembly only. No exceptions.
 - All C code must follow the memory discipline rules in this document.
 - All code must build cleanly with warnings-as-errors in CI.
 - Comments are technical and concise. Explain _why_, not _what_.
+- **No scaffolded or stubbed code in kernel space.** Every committed kernel function must be fully implemented and correct. See Section 4.8.
+- Userland stubs are permitted only when clearly marked and feature-gated.
 
-### 17.2 Documentation Quality
+### 19.2 Documentation Quality
 
 - Architecture-impacting changes require updates to this Bible or a new ADR.
 - Every new subsystem requires a README in its directory.
 - Memory layouts, hardware assumptions, and trust boundaries are documented near the code.
 
-### 17.3 Review Standards
+### 19.3 Review Standards
 
 - Kernel-space changes require review with explicit attention to memory safety and security boundaries.
 - Changes to this Bible require review from **AnotherLaughingMan** (sole owner).
 - COM runtime and security-critical changes require security-focused review.
 
-### 17.4 Conduct
+### 19.4 Conduct
 
 - This is a serious engineering project. Contributions are evaluated on technical merit.
 - The project's values (user sovereignty, privacy, censorship resistance) are non-negotiable. Contributions that undermine them will be rejected.
 
 ---
 
-## 18. Glossary
+## 20. Glossary
 
-| Term           | Definition                                                                              |
-| -------------- | --------------------------------------------------------------------------------------- |
-| ghOSt          | The operating system. Stylized as **ghOSt**, pronounced "Ghost OS".                     |
-| Minimal Rescue | The floppy/USB CLI-only deployment profile.                                             |
-| Full Install   | The complete desktop/server deployment profile.                                         |
-| COM            | Component Object Model — a binary interface standard for interprocess communication.    |
-| HAL            | Hardware Abstraction Layer.                                                             |
-| ADR            | Architecture Decision Record.                                                           |
-| Bible          | This document. The canonical design reference for ghOSt.                                |
-| Profile gate   | A build-time or runtime control that includes/excludes features per deployment profile. |
-| Local-first    | Functionality that works fully offline without external services.                       |
-| Trust boundary | A point in the architecture where privilege level or data trust level changes.          |
+| Term           | Definition                                                                                       |
+| -------------- | ------------------------------------------------------------------------------------------------ |
+| ghOSt          | The operating system. Stylized as **ghOSt**, pronounced "Ghost OS".                              |
+| Minimal Rescue | The floppy/USB CLI-only deployment profile.                                                      |
+| Full Install   | The complete desktop/server deployment profile.                                                  |
+| 32-bit compat  | The built-in subsystem that enables 32-bit apps to run on the 64-bit kernel (Full Install only). |
+| COM            | Component Object Model — a binary interface standard for interprocess communication.             |
+| HAL            | Hardware Abstraction Layer.                                                                      |
+| ADR            | Architecture Decision Record.                                                                    |
+| ABI            | Application Binary Interface — the syscall contract between kernel and userland.                 |
+| Bible          | This document. The canonical design reference for ghOSt.                                         |
+| Profile gate   | A build-time or runtime control that includes/excludes features per deployment profile.          |
+| Local-first    | Functionality that works fully offline without external services.                                |
+| Trust boundary | A point in the architecture where privilege level or data trust level changes.                   |
+| ghOSt PE       | Preinstallation Environment — bootable image used to install ghOSt onto a target disk.           |
+| GOP            | Graphics Output Protocol — UEFI interface for framebuffer access before a GPU driver is loaded.  |
+| xHCI           | Extensible Host Controller Interface — USB 3.x host controller standard.                         |
+| HDA            | High Definition Audio — Intel's audio controller specification for PC audio hardware.            |
+| SMP            | Symmetric Multiprocessing — using multiple CPU cores.                                            |
+| Local AI       | On-device AI inference with no cloud dependency. Cloud AI is user-opt-in only.                   |
+| UTF-8          | The canonical text encoding for ghOSt. All strings, filenames, configs, and APIs use UTF-8.      |
+| FDE            | Full-disk encryption — encrypting the entire disk at rest with a user-owned key.                 |
+| a11y           | Accessibility — designing the UX so it is usable by people with disabilities.                    |
+| HiDPI          | High dots-per-inch display support. Requires integer or fractional scaling in the compositor.    |
+| CI             | Continuous Integration — automated build, test, and verification pipeline.                       |
 
 ---
 
-## 19. Appendices
+## 21. Appendices
 
 ### Appendix A: Related Documents
 
-| Document                      | Location                   | Purpose                       |
-| ----------------------------- | -------------------------- | ----------------------------- |
-| Copilot Instructions          | `/copilot-instructions.md` | AI assistant behavioral rules |
-| Architecture Decision Records | `/docs/decisions/`         | Individual design decisions   |
+| Document                      | Location                   | Purpose                         |
+| ----------------------------- | -------------------------- | ------------------------------- |
+| Copilot Instructions          | `/copilot-instructions.md` | AI assistant behavioral rules   |
+| Architecture Decision Records | `/docs/decisions/`         | Individual design decisions     |
+| Changelog                     | `/CHANGELOG.md`            | Version history and release log |
+| Issues Log                    | `/docs/ISSUES.md`          | Issue tracking and status       |
 
 ### Appendix B: Revision History
 
-| Date       | Change                                                  | Author             |
-| ---------- | ------------------------------------------------------- | ------------------ |
-| 2026-03-07 | Initial creation. Codified from copilot-instructions.md | AnotherLaughingMan |
+| Date       | Change                                                                                                                                                                                                                                                                                                                                                                                          | Author             |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| 2026-03-07 | Initial creation. Codified from copilot-instructions.md                                                                                                                                                                                                                                                                                                                                         | AnotherLaughingMan |
+| 2026-03-07 | Added GPU-accelerated rendering architecture (Section 12.4), changelog and issues tracking                                                                                                                                                                                                                                                                                                      | AnotherLaughingMan |
+| 2026-03-07 | Added Versioning Architecture (Section 16) — OS-style versioning with separate kernel/UX tracks                                                                                                                                                                                                                                                                                                 | AnotherLaughingMan |
+| 2026-03-07 | Gap audit: added C coding style (7.4), text encoding (7.5), error handling (8.4), logging (8.5), user/permission model (10.4), disk encryption (10.5), ABI policy (13.2), process lifecycle (13.3), testing (15.4), CI (15.5), accessibility (12.6), multi-monitor/HiDPI (12.7), notifications (12.8), font rendering (12.9), deferred items (12.10). Expanded Appendix C to 24 open questions. | AnotherLaughingMan |
 
 ### Appendix C: Open Questions (To Be Decided)
 
 These are known areas that need formal decisions (future ADRs):
 
+**Architecture & Kernel:**
+
 1. Kernel architecture: monolithic vs microkernel vs hybrid?
 2. Filesystem design: custom VFS vs adopt existing?
-3. UX runtime: embedded browser engine vs custom renderer?
-4. COM implementation strategy: phased coverage plan?
-5. Driver model: in-kernel vs userspace drivers?
-6. Networking stack: scope and phasing?
-7. Update/package system: design and trust model?
-8. Virtualization subsystem: hypervisor type and integration?
+3. Driver model: in-kernel vs userspace drivers?
+4. Init system design: custom init, service dependencies, shutdown sequencing?
+5. Permission model: capability-based vs traditional UNIX-style?
+6. ABI freeze policy: when does the syscall interface stabilize?
+7. Swap / virtual memory policy: swap-to-disk, OOM killer, overcommit behavior?
+8. Power management: sleep/wake states (S0–S5), shutdown sequencing, lid/button handling?
+9. Time architecture: UTC internal, wall-clock conversion, NTP, monotonic vs real-time clock?
+
+**Security & Privacy:** 10. Disk encryption: FDE vs partition encryption, key derivation algorithm, boot unlock flow? 11. Update/package system: design, trust model, signed updates, A/B partitions?
+
+**UX & Applications:** 12. UX runtime: embedded browser engine vs custom renderer? 13. Font rendering engine: FreeType vs stb_truetype vs custom? 14. COM implementation strategy: phased coverage plan? 15. 32-bit compatibility subsystem: naming, thunking strategy, and API coverage scope?
+
+**Infrastructure:** 16. Test framework selection: Unity, CMocka, or custom? 17. CI pipeline: GitHub Actions configuration, smoke test design? 18. C coding style: confirm or amend the conventions in Section 7.4?
+
+**Networking & Services:** 19. Networking stack: scope and phasing? 20. Package management / software distribution: package format, repository model?
+
+**Hardware & Drivers:** 21. Virtualization subsystem: hypervisor type and integration? 22. GPU driver target: AMD AMDGPU open specs as first target?
+
+**Future:** 23. Local AI subsystem: inference runtime selection, model format, API surface, GPU/NPU dispatch? 24. Printing support: scope, driver model, and timeline?
 
 ---
 

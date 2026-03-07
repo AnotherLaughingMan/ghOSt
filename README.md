@@ -19,19 +19,20 @@ ghOSt is a ground-up OS with two deployment profiles:
 
 ## Technology
 
-| Layer         | Language            |
-|---------------|---------------------|
-| Kernel / Boot | Assembly + C        |
-| System services | C / C++           |
-| GUI shell     | C++ / HTML / CSS / JS / TS |
-| Configuration | JSON                |
+| Layer           | Language                   |
+| --------------- | -------------------------- |
+| Kernel / Boot   | Assembly + C               |
+| System services | C / C++                    |
+| GUI shell       | C++ / HTML / CSS / JS / TS |
+| Configuration   | JSON                       |
 
 UEFI boot required. Secure Boot and TPM support are optional (design does not block them).
 
 ## Documentation
 
 - [Development Bible](docs/DEVELOPMENT_BIBLE.md) — the canonical design reference
-- [Copilot Instructions](copilot-instructions.md) — AI assistant behavioral rules
+- [Changelog](CHANGELOG.md) — version history and release log
+- [Issue Tracker](docs/ISSUES.md) — known issues, planned work, and open questions
 
 ## Owner
 

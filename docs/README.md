@@ -4,10 +4,11 @@ This directory contains all architecture documentation, design references, and d
 
 ## Key Documents
 
-| Document                   | File                   | Purpose                                          |
-| -------------------------- | ---------------------- | ------------------------------------------------ |
-| **Development Bible**      | `DEVELOPMENT_BIBLE.md` | Canonical design reference. The law of the land. |
-| **Architecture Decisions** | `decisions/`           | Individual ADRs for significant design choices.  |
+| Document                   | File                   | Purpose                                           |
+| -------------------------- | ---------------------- | ------------------------------------------------- |
+| **Development Bible**      | `DEVELOPMENT_BIBLE.md` | Canonical design reference. The law of the land.  |
+| **Issue Tracker**          | `ISSUES.md`            | Issue tracking, planned work, and open questions. |
+| **Architecture Decisions** | `decisions/`           | Individual ADRs for significant design choices.   |
 
 ## Rules
 
