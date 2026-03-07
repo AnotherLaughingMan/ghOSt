@@ -1,0 +1,35 @@
+# Build artifacts
+build/
+out/
+*.o
+*.obj
+*.bin
+*.img
+*.iso
+*.elf
+*.efi
+*.sys
+*.lib
+*.a
+*.dll
+*.so
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS junk
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Logs
+*.log
+
+# Dependency / tooling caches
+node_modules/
+__pycache__/
+*.pyc
