@@ -40,4 +40,12 @@ UEFI boot required. Secure Boot and TPM support are optional (design does not bl
 
 ## License
 
-TBD — open-source license to be selected.
+Licensed under **GNU GPL v3.0 or later** (`GPL-3.0-or-later`).
+
+See [LICENSE](LICENSE) for the full license text and [ADR-0001](docs/decisions/ADR-0001-license-selection.md) for the rationale.
+
+## Contributing
+
+By submitting a contribution to ghOSt, you agree that your contribution will be licensed under **GPL-3.0-or-later**.
+
+Read the [Development Bible](docs/DEVELOPMENT_BIBLE.md) before making architecture-impacting changes.

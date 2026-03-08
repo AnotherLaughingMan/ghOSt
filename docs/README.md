@@ -15,3 +15,7 @@ This directory contains all architecture documentation, design references, and d
 - The Development Bible is a living document. Changes to it are architectural decisions.
 - ADRs are never deleted, only superseded.
 - Every contributor should read the Bible before making architecture-impacting changes.
+
+## Current ADRs
+
+- `ADR-0001` — license selection: GPL-3.0-or-later

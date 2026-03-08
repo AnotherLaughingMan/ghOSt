@@ -21,6 +21,8 @@ See the [Development Bible](docs/DEVELOPMENT_BIBLE.md) Section 16 for the full v
 
 - Project foundation: repository initialized with core documentation.
 - **Development Bible** (`/docs/DEVELOPMENT_BIBLE.md`) — canonical design reference covering architecture, philosophy, and roadmap.
+- **LICENSE** (`/LICENSE`) — project licensed under GPL-3.0-or-later.
+- **ADR-0001** (`/docs/decisions/ADR-0001-license-selection.md`) — license decision and rationale.
 - **Copilot Instructions** (`/copilot-instructions.md`) — AI assistant behavioral rules (local only, not tracked in git).
 - **README** (`/README.md`) — project landing page with mission, technology summary, and documentation links.
 - `.gitignore` configured for build artifacts, IDE files, and local-only documents.
@@ -34,6 +36,10 @@ See the [Development Bible](docs/DEVELOPMENT_BIBLE.md) Section 16 for the full v
 - 13-phase development roadmap (Phase 0–12) with dependency graph.
 - Versioning architecture defined: OS-style `MAJOR.MINOR.PATCH` with separate kernel and UX tracks.
 - Changelog (`/CHANGELOG.md`) and issue tracking (`/docs/ISSUES.md`) introduced.
+
+#### Changed
+
+- License selected: **GPL-3.0-or-later**. The project now uses strong copyleft to protect user sovereignty, privacy, and anti-censorship goals.
 
 ---
 

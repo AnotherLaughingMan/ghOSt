@@ -49,21 +49,6 @@ This document tracks known issues, planned work items, and open questions for th
 
 ## Open Issues
 
-### ISS-0001: Select open-source license
-
-| Field    | Value              |
-| -------- | ------------------ |
-| Status   | **Open**           |
-| Priority | **P1**             |
-| Category | `meta`             |
-| Phase    | Pre-Phase 0        |
-| Created  | 2026-03-07         |
-| Assignee | AnotherLaughingMan |
-
-**Description:** The project needs a license before accepting external contributions or distributing artifacts. README currently shows "TBD." Evaluate GPL v3, MIT, Apache 2.0, BSD, and MPL 2.0 against project values (user sovereignty, anti-censorship, open source). Record decision as an ADR.
-
----
-
 ### ISS-0002: Decide kernel architecture (monolithic vs micro vs hybrid)
 
 | Field    | Value              |
@@ -394,9 +379,157 @@ This document tracks known issues, planned work items, and open questions for th
 
 ---
 
+### ISS-0024: Design PCI/PCIe bus enumeration subsystem
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P0**             |
+| Category | `drivers`          |
+| Phase    | Phase 4–5          |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** PCI/PCIe enumeration is the foundation for AHCI, NVMe, USB (xHCI), GPU, and NIC drivers — nothing works without it. PCIe is the native bus on all modern x86-64 hardware; legacy PCI is a VM/fallback path only. Design the enumeration subsystem: ECAM discovery via MCFG ACPI table, extended config space (4096 bytes per function), capability linked-list walking (MSI, MSI-X, PCIe cap, Power Management, AER), BAR sizing/allocation (including 64-bit BARs), bridge recursion, multi-function detection, and device-to-driver matching. Must also handle PCIe error reporting (AER), max payload/read request size negotiation, and legacy CF8h/CFCh fallback. Must be correct before any PCI-based driver is attempted. See Bible Section 5.2.
+
+---
+
+### ISS-0025: Design AHCI driver architecture and pitfall mitigation
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P0**             |
+| Category | `drivers`          |
+| Phase    | Phase 4            |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** AHCI is the primary SATA storage path and a notorious source of OS-dev bugs. Before writing driver code, review and plan for every pitfall cataloged in Bible Section 5.3.2: IDE mode detection, PI-based port enumeration, DMA alignment, command engine stop/start ordering, COMRESET timing, FIS construction, 64-bit DMA verification, spurious interrupts, NCQ/non-NCQ separation, error recovery via port reset, watchdog timeouts, and ATAPI detection. The driver must be tested on QEMU AHCI emulation first, then verified on real hardware. See Bible Sections 5.3.1–5.3.4.
+
+---
+
+### ISS-0026: Implement IOMMU support (Intel VT-d / AMD-Vi)
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P1**             |
+| Category | `kernel`           |
+| Phase    | Phase 3–4          |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** IOMMU provides hardware-enforced DMA isolation — without it, any bus-mastering PCIe device can read/write any physical memory. Implement: ACPI DMAR table parsing (Intel VT-d) and IVRS table parsing (AMD-Vi), DMA remapping with per-device page tables, interrupt remapping, identity mapping during early boot, fault logging with BDF identification. Must be enabled before any device performs DMA on production systems. See Bible Section 5.4.1.
+
+---
+
+### ISS-0027: Implement APIC architecture (Local APIC / IOAPIC / x2APIC)
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P0**             |
+| Category | `kernel`           |
+| Phase    | Phase 2            |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** The interrupt delivery subsystem is foundational for everything: timer, scheduler, device interrupts, SMP. Implement: legacy 8259 PIC disable, Local APIC initialization per core, IOAPIC redirection table programming, MADT-based topology discovery, x2APIC detection and MSR-based initialization when available, IPI support for SMP startup and TLB shootdowns. See Bible Section 5.4.2.
+
+---
+
+### ISS-0028: Design NUMA-aware memory allocator
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P2**             |
+| Category | `kernel`           |
+| Phase    | Phase 3+           |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Modern multi-socket and chiplet-based systems use NUMA topology. Memory allocator must parse ACPI SRAT/SLIT tables, maintain per-node free lists, default to local-first allocation, and fall back by proximity distance. Scheduler should prefer keeping threads on CPUs near their memory. Must degrade gracefully to single-node behavior when SRAT is absent. See Bible Section 5.4.3.
+
+---
+
+### ISS-0029: Implement SMBIOS/DMI hardware inventory parsing
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P2**             |
+| Category | `kernel`           |
+| Phase    | Phase 5            |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Parse SMBIOS tables for hardware inventory: Type 0 (BIOS info), Type 1 (system info), Type 3 (chassis — desktop vs server detection), Type 4 (processor), Type 16/17 (memory arrays/devices, ECC capability). Expose via kernel API for userland tools. See Bible Section 5.4.4.
+
+---
+
+### ISS-0030: Implement ECC memory error monitoring
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P2**             |
+| Category | `kernel`           |
+| Phase    | Phase 5            |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** On ECC-capable systems: enable Machine Check Architecture (MCA), poll MC banks for corrected memory errors, log with physical address and DIMM location (from SMBIOS), threshold-alert on failing DIMMs, offline poisoned pages for uncorrectable errors. Must be a no-op on non-ECC systems. See Bible Section 5.4.5.
+
+---
+
+### ISS-0031: Implement headless / serial console support
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P1**             |
+| Category | `kernel`           |
+| Phase    | Phase 2            |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** The kernel must boot to a working CLI shell with no GPU, no keyboard, and no display — serial console only. Parse ACPI SPCR table for firmware-configured serial parameters. Ensure no code path panics or stalls on missing framebuffer. Server deployments depend entirely on this. See Bible Section 5.4.7.
+
+---
+
+### ISS-0032: Support network boot (PXE / HTTP Boot)
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P2**             |
+| Category | `boot`             |
+| Phase    | Phase 7–8          |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** The ghOSt bootloader EFI binary must be loadable via PXE (TFTP/DHCP) and UEFI HTTP Boot. No binary changes required — the same EFI binary works for disk, PXE, and HTTP Boot. PE installer handles network-based install configuration. See Bible Section 5.4.8.
+
+---
+
 ## Resolved Issues
 
-_No issues resolved yet._
+### ISS-0001: Select open-source license
+
+| Field           | Value                                          |
+| --------------- | ---------------------------------------------- |
+| Status          | **Resolved**                                   |
+| Priority        | **P1**                                         |
+| Category        | `meta`                                         |
+| Phase           | Pre-Phase 0                                    |
+| Created         | 2026-03-07                                     |
+| Resolved        | 2026-03-07                                     |
+| Assignee        | AnotherLaughingMan                             |
+| Resolution Link | `docs/decisions/ADR-0001-license-selection.md` |
+
+**Resolution:** ghOSt is licensed under **GPL-3.0-or-later**. GPL v3 was selected over MIT, Apache 2.0, BSD, and MPL 2.0 because strong copyleft and anti-tivoization protections best align with the project's user-sovereignty, privacy, and anti-censorship goals. The official license text is now in `/LICENSE`, README no longer shows `TBD`, and the rationale is recorded in ADR-0001.
 
 ---
 

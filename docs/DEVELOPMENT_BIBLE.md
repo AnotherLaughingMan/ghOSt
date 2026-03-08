@@ -231,6 +231,302 @@ Kernel code is too sensitive for placeholder implementations. Every function tha
 This diagram is aspirational and will evolve. Not all components exist yet.
 The layering is intentional: each boundary is a potential security and modularity boundary.
 
+### 5.1 Driver Model
+
+ghOSt uses a **register-probe-attach** driver model. Every driver is a kernel-mode module that:
+
+1. **Registers** itself with the Device Manager, declaring which bus types and device IDs it can handle.
+2. **Probes** a candidate device when the bus enumerator discovers a matching device. Probe must be non-destructive — it verifies the device is actually present and compatible, then returns success or failure.
+3. **Attaches** to the device on successful probe, taking ownership of that device's resources (MMIO regions, IRQs, DMA channels).
+
+| Principle                   | Rule                                                                                                  |
+| --------------------------- | ----------------------------------------------------------------------------------------------------- |
+| One driver per device       | No two drivers may claim the same device simultaneously.                                              |
+| Explicit resource ownership | A driver must request and receive exclusive access to MMIO, I/O ports, and IRQ lines from the kernel. |
+| No blind probing            | Drivers must not touch hardware registers before the bus enumerator has matched them.                 |
+| Fail-safe detach            | Every driver must implement a `detach` path that releases all resources cleanly.                      |
+| No blocking in probe        | Probe must complete quickly. Lengthy initialization happens in attach.                                |
+| DMA only through kernel API | Drivers never compute physical addresses themselves. All DMA buffers go through the kernel allocator. |
+
+### 5.2 Bus Enumeration (PCI/PCIe)
+
+PCI Express (PCIe) is the primary interconnect on all modern x86-64 hardware. Legacy parallel PCI is effectively dead — every AHCI controller, NVMe drive, USB host, GPU, and NIC on a modern system sits behind PCIe. ghOSt treats **PCIe as the native bus** and supports legacy PCI configuration only as a fallback for virtual machines and older hardware.
+
+#### 5.2.1 PCI vs PCIe — What's Different
+
+| Aspect           | Legacy PCI                                             | PCIe                                                               |
+| ---------------- | ------------------------------------------------------ | ------------------------------------------------------------------ |
+| Topology         | Shared parallel bus                                    | Point-to-point serial links with switches                          |
+| Config space     | 256 bytes per function (I/O port access via CF8h/CFCh) | 4096 bytes per function (memory-mapped via ECAM)                   |
+| Discovery        | Port I/O config mechanism 1                            | ECAM (Enhanced Configuration Access Mechanism) via MCFG ACPI table |
+| Interrupts       | INTx (shared, level-triggered)                         | MSI / MSI-X (dedicated, edge-triggered, scalable)                  |
+| Bandwidth        | 133 MB/s shared                                        | Per-lane: 250 MB/s (Gen1) to 3.9 GB/s (Gen5), per direction        |
+| Error reporting  | PCI Status register (limited)                          | AER (Advanced Error Reporting) capability structure                |
+| Power management | None / PME# pin                                        | PCIe PM capability + ASPM (Active State Power Management)          |
+| Hot-plug         | Rare                                                   | Native support via hot-plug capability                             |
+
+**ghOSt must support both config mechanisms** because QEMU and some older systems expose legacy PCI. But all new driver work targets PCIe capabilities.
+
+#### 5.2.2 ECAM and Extended Config Space
+
+On PCIe systems, the MCFG ACPI table provides the base address for the ECAM (Enhanced Configuration Access Mechanism) region — a memory-mapped window that gives direct access to the full 4096-byte config space of every function.
+
+**ECAM address formula:** `base + (bus << 20) | (device << 15) | (function << 12) + register`
+
+**Rules:**
+
+- **Always check for MCFG first.** If present, use ECAM for all config access. Fall back to CF8h/CFCh only if MCFG is absent (legacy PCI or old VMs).
+- **Map the ECAM region as uncacheable (UC) in the page tables.** Config space is a hardware register window — caching it causes stale reads.
+- **The extended config space (bytes 256–4095) is only accessible via ECAM.** Legacy CF8h/CFCh can only reach the first 256 bytes. PCIe capability structures live in the extended range.
+- **Validate MCFG entries.** Each entry specifies a bus range and base address. Do not assume a single entry covers all buses.
+
+#### 5.2.3 PCIe Capability Structures
+
+PCIe devices advertise their features through a linked list of capability structures starting at the offset in config byte 34h (Capabilities Pointer). Extended capabilities (PCIe-specific) start at offset 100h in the extended config space.
+
+**Capabilities ghOSt must parse:**
+
+| Capability             | ID    | Why it matters                                                                        |
+| ---------------------- | ----- | ------------------------------------------------------------------------------------- |
+| **MSI**                | 05h   | Message Signaled Interrupts — allocate vectors, prefer over INTx                      |
+| **MSI-X**              | 11h   | Scalable MSI with per-vector masking — preferred for multi-queue devices (NVMe, xHCI) |
+| **PCIe**               | 10h   | Device/port type, link speed/width, max payload size, max read request size           |
+| **Power Management**   | 01h   | D-states (D0–D3), PME support — required for sleep/wake                               |
+| **AER** (extended)     | 0001h | Advanced Error Reporting — correctable/uncorrectable error logging and masking        |
+| **ASPM** (in PCIe cap) | —     | Active State Power Management — L0s/L1 link states for power savings                  |
+| **SR-IOV** (extended)  | 0010h | Single Root I/O Virtualization — future, if VM support is planned                     |
+
+**Rules:**
+
+- **Walk the entire capability list at enumeration time.** Cache the offsets of capabilities each driver will need.
+- **Never hard-code capability offsets.** They vary by device. Always follow the linked list.
+- **Require MSI or MSI-X for all new drivers.** INTx is a fallback only for legacy PCI devices.
+- **Read and respect Max Payload Size and Max Read Request Size** from the PCIe capability. Violations cause malformed TLP errors that are hard to diagnose.
+
+#### 5.2.4 Enumeration Sequence
+
+1. Parse MCFG ACPI table. If present, map ECAM regions. Otherwise, use legacy CF8h/CFCh.
+2. Walk PCI configuration space (bus 0–255, device 0–31, function 0–7).
+3. For each discovered function, read vendor ID, device ID, class code, subclass, prog-if, and header type.
+4. Record all BARs (Base Address Registers). DO NOT write to BARs unless the kernel is performing resource allocation.
+5. Walk the capability linked list (offset 34h). Record MSI/MSI-X capability offset. If ECAM is available, also walk extended capabilities at offset 100h+.
+6. Identify bridge devices (header type 01h) and recursively enumerate subordinate buses.
+7. Match discovered devices against registered drivers. Call probe on match.
+
+**Hard rules:**
+
+- **Never assume bus topology.** Enumerate; don't guess. PCIe switches create non-obvious hierarchies.
+- **BAR sizing uses the standard read-write-read method.** Write all-ones, read back, mask, restore. Do this with interrupts disabled for the device.
+- **MSI/MSI-X over legacy INTx.** Always prefer message-signaled interrupts when the device supports them. Allocate MSI-X vectors proportional to the device's queue count.
+- **Cache enumeration results.** Walk the bus once at boot; don't re-scan unless hot-plug is involved.
+- **Respect 64-bit BARs.** A BAR pair (BAR[n] + BAR[n+1]) can form a 64-bit address. Check the BAR type field before interpreting.
+- **Do not ignore multi-function devices.** If header type bit 7 is set on function 0, check functions 1–7.
+
+#### 5.2.5 PCIe Error Handling
+
+On PCIe, errors are categorized as correctable or uncorrectable (non-fatal / fatal). AER capability exposes registers for each category.
+
+**Minimum requirements:**
+
+- **Enable AER if the capability is present.** Mask correctable errors in production (they're informational). Log uncorrectable errors and trigger device reset on fatal errors.
+- **Check Device Status register (offset 06h in PCIe capability) for error flags.** These are set even without AER.
+- **Fatal errors require link reset.** A Secondary Bus Reset (SBR) through the parent bridge, or a Function-Level Reset (FLR) if supported.
+- **Log all PCIe errors with the full BDF (bus:device.function) identifier** so the failing device is immediately identifiable.
+- **Completion Timeout (CTO) is the most common PCIe error in OS development.** It means the device didn't respond to a memory read. Causes: wrong BAR mapping, device in D3 power state, or device not properly initialized. Always check for this first.
+
+### 5.3 AHCI Architecture and Known Pitfalls
+
+AHCI (Advanced Host Controller Interface) is the standard register-level interface for SATA controllers. It is the primary storage path for spinning disks and many SSDs. The AHCI specification (Intel, publicly available) is the authoritative reference — but specs do not warn you about the real-world bugs.
+
+**This section exists to prevent us from debugging the same AHCI pitfalls that every OS project hits.**
+
+#### 5.3.1 AHCI Initialization Sequence
+
+The init sequence is order-sensitive. Violating this order causes silent data corruption or controller hangs.
+
+```
+1. Discover AHCI controller via PCI enumeration (class 01h, subclass 06h, prog-if 01h).
+2. Map the HBA MMIO region (BAR 5 / ABAR).
+3. Read GHC.AE (AHCI Enable) — set it if not already set. Some BIOSes leave the controller in legacy IDE mode.
+4. Read CAP register — determine port count, command slot count, 64-bit DMA support, NCQ support.
+5. Read PI (Ports Implemented) — only touch ports whose bits are set in PI. Do NOT enumerate based on port count alone.
+6. For each implemented port:
+   a. Stop the port command engine (clear PxCMD.ST, wait for PxCMD.CR to clear; clear PxCMD.FRE, wait for PxCMD.FR to clear).
+   b. Allocate and set PxCLB (Command List Base) — must be 1024-byte aligned.
+   c. Allocate and set PxFB (FIS Base) — must be 256-byte aligned.
+   d. Clear PxSERR (write all-ones to clear).
+   e. Clear PxIS (write all-ones to clear pending interrupts).
+   f. Enable desired interrupts in PxIE.
+   g. Start the port (set PxCMD.FRE first, then PxCMD.ST).
+7. Enable global interrupts: GHC.IE = 1.
+8. Optionally perform COMRESET on each port to detect attached devices (check PxSSTS.DET for device presence).
+```
+
+#### 5.3.2 Known Pitfalls (MUST READ before writing AHCI code)
+
+| Pitfall                             | What goes wrong                                                                                                                                                                                                         | How to prevent it                                                                                                                                                                                                                     |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **IDE mode at boot**                | BIOS/firmware leaves AHCI controller in legacy IDE emulation mode. Your AHCI driver finds nothing.                                                                                                                      | Check PCI prog-if. If it's 00h or 80h (IDE), check if the controller supports AHCI mode switching via a vendor-specific PCI config register. Intel controllers use MAP register at offset 90h. **Do not assume AHCI mode is active.** |
+| **Ports Implemented vs port count** | CAP.NP reports max ports, but only ports with bits set in the PI register are real. Touching phantom ports hangs the controller.                                                                                        | **Always use PI, never NP alone.** Iterate only over set bits in PI.                                                                                                                                                                  |
+| **Alignment violations**            | Command list (PxCLB) must be 1024-byte aligned. Received FIS (PxFB) must be 256-byte aligned. Command tables must be 128-byte aligned. PRDTs within command tables must not cross 64 KB boundaries on some controllers. | Use the kernel's aligned DMA allocator. Verify alignment with assertions. Never allocate these structures on the stack.                                                                                                               |
+| **Stopping the command engine**     | Clearing PxCMD.ST while PxCMD.CR is still 1 (commands running) causes undefined behavior on some controllers.                                                                                                           | Clear ST, then **poll CR until it reads 0** with a timeout (500ms per AHCI spec). Same for FRE/FR. If it doesn't clear, port reset is required.                                                                                       |
+| **COMRESET timing**                 | Some drives need time after COMRESET before they're ready. Issuing commands too early gets garbage status.                                                                                                              | After COMRESET, poll PxSSTS.DET for value 3h (device present, PHY established). Then wait for PxTFD.BSY and PxTFD.DRQ to clear. Add a reasonable delay (spec says up to 10ms, but some drives need more).                             |
+| **FIS construction errors**         | Incorrect FIS type, wrong byte ordering, missing fields in Register H2D FIS.                                                                                                                                            | Use a well-tested FIS builder function. A Register H2D FIS is exactly 20 bytes. The FIS type byte is 27h. The command/control bit is bit 7 of byte 1. Verify every field.                                                             |
+| **64-bit DMA**                      | Controller advertises 64-bit support (CAP.S64A) but firmware configured it for 32-bit only, or the controller ignores upper 32 bits for certain structures.                                                             | If CAP.S64A is set, you may use 64-bit addresses. But test it — allocate a DMA buffer above 4 GB and verify a read/write works. If not, fall back to allocating all AHCI DMA buffers below 4 GB.                                      |
+| **Spurious interrupts**             | Controller fires interrupts during initialization before your handler is ready, or fires interrupts for ports you haven't initialized.                                                                                  | Clear PxIS and PxSERR for all ports before global interrupt enable. Register your interrupt handler before setting GHC.IE. Ignore interrupts for ports you haven't initialized.                                                       |
+| **NCQ vs non-NCQ mixing**           | AHCI supports both queued (NCQ/FPDMA) and non-queued commands, but they must not be mixed in the same command slot sequence. Mixing causes command ordering violations.                                                 | Track whether the port is in NCQ mode or non-NCQ mode. Drain one before switching to the other. Start with non-NCQ; add NCQ support later as an optimization.                                                                         |
+| **Error recovery**                  | A failed command can leave the port in an error state. If you don't reset the port properly, all subsequent commands fail.                                                                                              | On error: stop command engine → clear PxSERR → clear PxIS → COMRESET → restart. Re-issue failed commands. Log the error register contents for diagnosis.                                                                              |
+| **Timeout without recovery**        | A command sits in a slot forever. No interrupt fires. The driver hangs waiting.                                                                                                                                         | Every issued command must have a watchdog timeout. If the timeout expires, trigger error recovery (port reset). Never block indefinitely on command completion.                                                                       |
+| **ATAPI vs ATA confusion**          | SATA port may have an ATAPI device (optical drive). The PxSIG register gives the device signature after reset — ATA is 0x00000101, ATAPI is 0xEB140101. If you send ATA commands to an ATAPI device, it will NAK.       | Check PxSIG after COMRESET and device detection. Route ATAPI devices to a separate command path (PACKET commands).                                                                                                                    |
+
+#### 5.3.3 DMA Design Rules for AHCI
+
+- **All AHCI DMA structures must be allocated from physically contiguous, cache-coherent memory.** This includes the command list, received FIS area, command tables, and PRDT data buffers.
+- **PRDT entries may not cross a 4 MB boundary** (hardware limit per entry). Keep PRDT entries conservative — one physical page per entry is safe and simple.
+- **Maximum PRDT length per command table is 65535 entries** (spec limit), but sane drivers use far fewer. A single 4 KB-aligned page per entry means one PRDT entry per page — simple and cache-friendly.
+- **Zero every DMA buffer before first use.** Prevents leaking stale data if the controller reads before you fill the buffer.
+- **Never reuse a command slot until the controller has finished with it.** Check PxCI (command issued) bit for the slot — if it's still set, the controller owns that memory.
+- **Ensure DMA buffers remain pinned (not swappable) for the duration of the command.** Page eviction during an active DMA transfer causes data corruption.
+
+#### 5.3.4 Testing Strategy for AHCI
+
+- **Primary test target: QEMU with AHCI emulation.** QEMU's ICH9-AHCI is a well-tested reference. Enable it with `-device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0`.
+- **Verify with a real SATA drive** as early as possible. QEMU hides many timing and alignment bugs.
+- **Test hot-plug** (connect/disconnect a SATA device while running) — even if hot-plug isn't supported initially, the driver must not crash.
+- **Test with drives behind port multipliers** if port multiplier support is planned.
+- **Stress test: issue thousands of I/O operations** and verify data integrity end-to-end with checksums.
+- **Test error paths explicitly:** simulate drive removal mid-command, inject timeout scenarios, corrupt a FIS and verify recovery.
+
+### 5.4 Modern Platform Standards
+
+ghOSt targets modern x86-64 hardware — desktop and server. The following platform-level standards are required for correct operation on contemporary systems. Ignoring them means poor performance, security gaps, or outright incompatibility with server-class hardware.
+
+#### 5.4.1 IOMMU (Intel VT-d / AMD-Vi)
+
+An IOMMU translates device-initiated DMA addresses through page tables, providing hardware-enforced DMA isolation. Without it, any bus-mastering device can read/write any physical memory — a catastrophic security hole.
+
+| Requirement                   | Detail                                                                                                                                                                 |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Detection                     | Parse ACPI DMAR table (Intel VT-d) or IVRS table (AMD-Vi). If neither is present, IOMMU is unavailable.                                                                |
+| Enablement                    | Enable translation by programming the IOMMU hardware registers. Must happen before any device performs DMA.                                                            |
+| DMA remapping                 | Every device gets a restricted DMA address space. Only pages explicitly mapped by the kernel are accessible to that device.                                            |
+| Identity mapping (early boot) | During early init before the full IOMMU driver is up, use a 1:1 identity map so UEFI-started devices continue working. Replace with restricted maps as drivers attach. |
+| Interrupt remapping           | IOMMU can remap MSI/MSI-X interrupts too — prevents devices from forging interrupt vectors. Enable this.                                                               |
+| Fault logging                 | IOMMU faults (device tried to access unmapped address) must be logged with the BDF of the offending device, the faulting address, and access type.                     |
+| Passthrough mode              | For debugging or performance-critical paths, allow per-device passthrough (no translation) — but never as the default.                                                 |
+
+**Why this is non-negotiable:** DMA attacks are a real threat (Thunderbolt/PCIe, compromised firmware, malicious peripherals). Any OS claiming security must enforce DMA isolation.
+
+#### 5.4.2 APIC Architecture (APIC / x2APIC / IOAPIC)
+
+The interrupt delivery architecture on x86-64 has three components: the Local APIC (per-core), the IOAPIC (for routing external interrupts), and optionally x2APIC (for scalability beyond 255 logical processors).
+
+| Component  | Purpose                                                                                  | ghOSt requirement                                                                                      |
+| ---------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Local APIC | Per-CPU interrupt receipt, IPI delivery, timer                                           | **Required.** Must detect and initialize on every core.                                                |
+| IOAPIC     | Routes pin-based interrupts (legacy IRQs, HPET, etc.) to Local APICs                     | **Required.** Parse MADT for IOAPIC entries. Program redirection table entries.                        |
+| x2APIC     | Extended APIC mode — MSR-based access, 32-bit APIC IDs, supports >255 logical processors | **Required on systems that support it.** Check CPUID bit 21 (ECX of leaf 01h) and MADT x2APIC entries. |
+
+**Rules:**
+
+- **Disable the legacy 8259 PIC.** Mask all 8259 interrupts and remap them out of the way before enabling APIC.
+- **Use MADT (APIC table) for topology discovery.** Never hard-code APIC IDs or assume contiguous numbering.
+- **Switch to x2APIC mode when available.** x2APIC uses MSRs instead of MMIO — it's faster and mandatory for systems with >255 cores.
+- **Support IPI (Inter-Processor Interrupt)** for SMP startup, TLB shootdowns, and cross-core scheduling notifications.
+
+#### 5.4.3 NUMA Awareness
+
+Non-Uniform Memory Access (NUMA) is the memory architecture on all modern multi-socket and many single-socket server systems. Each CPU socket (or chiplet) has "local" memory that's fast, and "remote" memory attached to other sockets that's slower.
+
+**Why it matters:** A NUMA-unaware allocator will randomly place memory pages, causing 2–4x latency penalties for cross-socket accesses. On a 4-socket server, this makes the system unusable.
+
+| Requirement             | Detail                                                                                                                            |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| SRAT table parsing      | Parse the ACPI SRAT (System Resource Affinity Table) to discover proximity domains and the CPU-to-memory mapping.                 |
+| SLIT table parsing      | Parse ACPI SLIT (System Locality Information Table) for inter-node distance metrics.                                              |
+| Per-node memory pools   | The physical memory allocator must maintain per-NUMA-node free lists.                                                             |
+| Local-first allocation  | Default allocation policy: allocate from the NUMA node local to the requesting CPU.                                               |
+| Interleave fallback     | If the local node is exhausted, fall back to the nearest node (by SLIT distance), not a random one.                               |
+| Process/thread affinity | The scheduler should prefer running threads on CPUs in the same NUMA domain as their memory allocations.                          |
+| Single-socket fallback  | If SRAT is absent (single-socket desktop), treat the entire system as one NUMA node. No code path may break in the non-NUMA case. |
+
+#### 5.4.4 SMBIOS / DMI
+
+SMBIOS (System Management BIOS) tables provide hardware inventory data: motherboard model, serial numbers, BIOS version, CPU socket count, memory DIMM configuration, chassis type, etc.
+
+| Requirement           | Detail                                                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Entry point           | Scan for SMBIOS 3.0 64-bit entry point (anchor `_SM3_`) in EFI system table or physical memory F0000h–FFFFFh. Fall back to SMBIOS 2.x (`_SM_`) if 3.0 isn't found. |
+| Parsing               | Walk the structure table. Decode Type 0 (BIOS info), Type 1 (System info), Type 4 (Processor), Type 16/17 (Memory array/device).                                   |
+| Exposure              | Expose parsed hardware info via a kernel API for userland tools (system inventory, diagnostic commands).                                                           |
+| Server identification | SMBIOS chassis type (Type 3) distinguishes desktop, server, notebook, etc. This can inform auto-configuration defaults.                                            |
+
+#### 5.4.5 ECC Memory Awareness
+
+Server-class systems use ECC (Error-Correcting Code) memory. The memory controller can detect and correct single-bit errors and detect (but not correct) multi-bit errors. The OS must participate in monitoring this.
+
+| Requirement                      | Detail                                                                                                                                                                          |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Detection                        | Check SMBIOS Type 16 (memory array error correction type) and Type 17 (memory device) for ECC capability.                                                                       |
+| Machine Check Architecture (MCA) | Enable MCE (Machine Check Exception) and poll Machine Check banks for corrected memory errors. Log every corrected error with physical address and DIMM location (from SMBIOS). |
+| Threshold monitoring             | Track corrected error counts per DIMM. Alert (via log + notification) if a DIMM exceeds a threshold — it's likely failing.                                                      |
+| Uncorrectable errors             | An uncorrectable memory error triggers MCE. If the affected page is not in use, offline it. If it's in use, panic is the only safe option — data integrity is compromised.      |
+| Non-ECC fallback                 | On desktop systems without ECC, skip memory error monitoring. No code path may assume ECC is present.                                                                           |
+
+#### 5.4.6 Hardware Watchdog Timer
+
+Servers and embedded systems require a hardware watchdog — a timer that reboots the machine if the OS stops responding. Unattended servers cannot afford indefinite hangs.
+
+| Requirement       | Detail                                                                                                                                                                 |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Detection         | Check ACPI WDAT (Watchdog Action Table) for a platform watchdog. Also check for iTCO watchdog on Intel chipsets (PCI device, usually on LPC/eSPI bus).                 |
+| Kernel heartbeat  | Once enabled, the kernel must periodically reset (pet) the watchdog from a timer interrupt or heartbeat thread. If the kernel hangs, the watchdog fires.               |
+| Timeout           | Configurable via JSON config. Default: 60 seconds. Must be long enough that normal heavy I/O doesn't trigger a false reboot.                                           |
+| Disable path      | Allow explicit disable via kernel command-line or config for debugging (so developers don't get rebooted while single-stepping).                                       |
+| Panic integration | On kernel panic, the kernel may choose to let the watchdog expire (triggering hardware reboot) or explicitly trigger reset. This is a policy decision (config-driven). |
+
+#### 5.4.7 Headless / Serial Console Operation
+
+Server installations often have no GPU, no keyboard, and no local display. ghOSt must be fully operational in headless mode.
+
+| Requirement        | Detail                                                                                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Serial console     | The kernel must support a serial console (COM port or UEFI serial) as the primary I/O channel for boot messages, kernel logs, login prompt, and CLI shell. |
+| No GPU required    | The kernel must boot and reach a working CLI shell even if zero GPUs are detected. No code path may panic or stall on missing framebuffer.                 |
+| SPCR table         | Parse ACPI SPCR (Serial Port Console Redirection) table for firmware-configured serial parameters (baud rate, port, flow control).                         |
+| EFI console output | Use EFI ConOut (Simple Text Output Protocol) during early boot before the kernel's serial driver is up.                                                    |
+| Remote management  | Out-of-band management (IPMI/BMC) is a future consideration. The serial console is the minimum viable server management interface.                         |
+
+#### 5.4.8 Network Boot (PXE / HTTP Boot)
+
+Server deployment depends on network boot. UEFI provides two mechanisms:
+
+| Mechanism                           | How it works                                                                  | ghOSt support                                                                                        |
+| ----------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| PXE (Preboot Execution Environment) | UEFI downloads a boot image via TFTP/DHCP                                     | Support as a boot source. The ghOSt bootloader must be loadable as a PXE NBP (Network Boot Program). |
+| HTTP Boot (UEFI 2.5+)               | UEFI downloads a boot image via HTTP/HTTPS from a URL provided by DHCP option | Preferred over PXE for modern deployments. Support when the UEFI firmware offers it.                 |
+
+**Rules:**
+
+- The ghOSt bootloader EFI binary must work when loaded by PXE or HTTP Boot — no changes to the binary itself.
+- Network boot configuration (install server URL, kickstart-style configs) is handled by the PE installer, not the kernel.
+- Network boot does **not** require the kernel to have its own network driver during early boot — UEFI firmware handles the network transfer.
+
+#### 5.4.9 High-Speed Networking (Server NICs)
+
+Desktop NICs (1 GbE) are well-served by simple ring-buffer drivers. Server NICs (10/25/40/100 GbE) require fundamentally different approaches.
+
+| Feature              | Why it matters                                                                            | ghOSt requirement                                                                       |
+| -------------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Multi-queue (RSS)    | Distribute incoming packets across CPU cores via hardware hash                            | Allocate one RX/TX queue per core. Configure the RSS indirection table to match.        |
+| Interrupt coalescing | Reduce interrupt overhead at high packet rates                                            | Support adaptive coalescing: batch completions, use timer-based moderation.             |
+| Checksum offload     | Hardware computes TCP/UDP/IP checksums                                                    | Use hardware offload when available - do not re-compute in software.                    |
+| TSO/GRO              | TCP Segmentation Offload / Generic Receive Offload — hardware handles packet segmentation | Essential for saturating 10 GbE+ links. Support when the NIC advertises the capability. |
+| NAPI-style polling   | At high packet rates, switch from interrupt-driven to poll-mode to avoid interrupt storms | Design the NIC driver interface to support both interrupt and poll modes.               |
+| Jumbo frames         | MTU > 1500 (up to 9000) for reduced per-packet overhead                                   | Support configurable MTU. Default remains 1500; jumbo is opt-in.                        |
+
+**Initial target:** One well-documented 10 GbE NIC family. Intel X710/XL710 (i40e) has public datasheets. Virtio-net for VM testing.
+
 ---
 
 ## 6. Deployment Profiles
@@ -259,9 +555,16 @@ The layering is intentional: each boundary is a potential security and modularit
 | Purpose         | Daily-use desktop/server operating system          |
 | Feature scope   | Full kernel + all drivers + GUI + app compat + COM |
 | Size budget     | Practical but not unconstrained; justify bloat     |
-| Graphical stack | **Required**                                       |
+| Graphical stack | **Required** (desktop) / **Optional** (server)     |
 | COM runtime     | **Required** (long-term milestone)                 |
 | Network         | Full networking stack                              |
+| IOMMU           | **Enabled by default** when hardware supports it   |
+| NUMA            | **Topology-aware** allocation and scheduling       |
+| Headless mode   | **Supported** — serial console, no GPU required    |
+| ECC monitoring  | **Active** on ECC-capable hardware                 |
+| Watchdog        | **Available** — configurable via JSON config       |
+
+**Server deployment note:** The Full Install Profile must be fully functional with no local display, no keyboard, and no mouse — controlled entirely over serial console or network. The graphical stack is a feature of the desktop sub-profile, not a hard requirement of Full Install. Server-class hardware features (IOMMU for DMA protection, NUMA for memory locality, ECC monitoring, hardware watchdog, multi-queue NICs, network boot) are first-class concerns, not afterthoughts. See Section 5.4 for the full specification.
 
 ### 6.3 Profile Rules
 
@@ -952,15 +1255,15 @@ Building an OS from scratch is one of the hardest software engineering undertaki
 
 **Goal:** Read and write persistent storage. This is required before any useful OS operations.
 
-| Task            | Detail                                                            | Hard Problems                                              |
-| --------------- | ----------------------------------------------------------------- | ---------------------------------------------------------- |
-| AHCI driver     | SATA controller driver for hard drives/SSDs                       | PCI enumeration first, AHCI register interface, DMA        |
-| NVMe driver     | NVMe controller for modern SSDs                                   | Submission/completion queue model, PCIe config space       |
-| Partition table | GPT parsing (UEFI standard)                                       | Protective MBR, GUID handling                              |
-| VFS layer       | Virtual Filesystem Switch — abstraction over concrete filesystems | Inode/dentry model, mount points, path resolution          |
-| FAT32 driver    | Required for UEFI ESP and basic interop                           | Long filename support, cluster chaining, edge cases        |
-| Ext2/custom FS  | A real filesystem for the root partition                          | Journal (ext3/4) adds complexity — ext2 is a simpler start |
-| Block cache     | Cache disk blocks in memory                                       | Cache coherency, write-back vs write-through               |
+| Task            | Detail                                                                                                                                                 | Hard Problems                                                                                                                                                                                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AHCI driver     | SATA controller driver for hard drives/SSDs. See Section 5.3 for architecture and pitfall catalog — read it before writing a single line of AHCI code. | PCI enumeration first, IDE-to-AHCI mode switching, HBA register init sequence (5.3.1), DMA alignment (5.3.3), COMRESET timing, port stop/start ordering, error recovery with port reset, 64-bit DMA verification, ATAPI detection. Every pitfall in 5.3.2 must be addressed. |
+| NVMe driver     | NVMe controller for modern SSDs                                                                                                                        | Submission/completion queue model, PCIe config space                                                                                                                                                                                                                         |
+| Partition table | GPT parsing (UEFI standard)                                                                                                                            | Protective MBR, GUID handling                                                                                                                                                                                                                                                |
+| VFS layer       | Virtual Filesystem Switch — abstraction over concrete filesystems                                                                                      | Inode/dentry model, mount points, path resolution                                                                                                                                                                                                                            |
+| FAT32 driver    | Required for UEFI ESP and basic interop                                                                                                                | Long filename support, cluster chaining, edge cases                                                                                                                                                                                                                          |
+| Ext2/custom FS  | A real filesystem for the root partition                                                                                                               | Journal (ext3/4) adds complexity — ext2 is a simpler start                                                                                                                                                                                                                   |
+| Block cache     | Cache disk blocks in memory                                                                                                                            | Cache coherency, write-back vs write-through                                                                                                                                                                                                                                 |
 
 **Exit criteria:** Kernel can mount a root filesystem, read files, and write files.
 
@@ -1212,6 +1515,8 @@ Each phase must be stable and tested before the next begins. Phases 4/5 and 7/8 
 | Browser-like UX     | Essentially building a web engine                                  | Evaluate embedding existing tech vs custom; phased approach        |
 | Secure Boot         | Requires signing infrastructure, key management, Microsoft UEFI CA | Design-compatible now, implement later                             |
 | SMP (multi-core)    | AP startup, cache coherency, lock-free data structures             | Single-core first, SMP after scheduler is stable                   |
+| IOMMU               | DMA isolation, interrupt remapping — required for security on PCIe | Parse DMAR/IVRS tables; enable before any device does DMA          |
+| NUMA awareness       | Memory allocation locality on multi-socket/chiplet systems         | Single-socket first; SRAT/SLIT parsing added when multi-socket targeted |
 
 ---
 
@@ -1285,31 +1590,39 @@ All significant architecture decisions are recorded in `/docs/decisions/` using 
 
 ## 20. Glossary
 
-| Term           | Definition                                                                                       |
-| -------------- | ------------------------------------------------------------------------------------------------ |
-| ghOSt          | The operating system. Stylized as **ghOSt**, pronounced "Ghost OS".                              |
-| Minimal Rescue | The floppy/USB CLI-only deployment profile.                                                      |
-| Full Install   | The complete desktop/server deployment profile.                                                  |
-| 32-bit compat  | The built-in subsystem that enables 32-bit apps to run on the 64-bit kernel (Full Install only). |
-| COM            | Component Object Model — a binary interface standard for interprocess communication.             |
-| HAL            | Hardware Abstraction Layer.                                                                      |
-| ADR            | Architecture Decision Record.                                                                    |
-| ABI            | Application Binary Interface — the syscall contract between kernel and userland.                 |
-| Bible          | This document. The canonical design reference for ghOSt.                                         |
-| Profile gate   | A build-time or runtime control that includes/excludes features per deployment profile.          |
-| Local-first    | Functionality that works fully offline without external services.                                |
-| Trust boundary | A point in the architecture where privilege level or data trust level changes.                   |
-| ghOSt PE       | Preinstallation Environment — bootable image used to install ghOSt onto a target disk.           |
-| GOP            | Graphics Output Protocol — UEFI interface for framebuffer access before a GPU driver is loaded.  |
-| xHCI           | Extensible Host Controller Interface — USB 3.x host controller standard.                         |
-| HDA            | High Definition Audio — Intel's audio controller specification for PC audio hardware.            |
-| SMP            | Symmetric Multiprocessing — using multiple CPU cores.                                            |
-| Local AI       | On-device AI inference with no cloud dependency. Cloud AI is user-opt-in only.                   |
-| UTF-8          | The canonical text encoding for ghOSt. All strings, filenames, configs, and APIs use UTF-8.      |
-| FDE            | Full-disk encryption — encrypting the entire disk at rest with a user-owned key.                 |
-| a11y           | Accessibility — designing the UX so it is usable by people with disabilities.                    |
-| HiDPI          | High dots-per-inch display support. Requires integer or fractional scaling in the compositor.    |
-| CI             | Continuous Integration — automated build, test, and verification pipeline.                       |
+| Term           | Definition                                                                                            |
+| -------------- | ----------------------------------------------------------------------------------------------------- |
+| ghOSt          | The operating system. Stylized as **ghOSt**, pronounced "Ghost OS".                                   |
+| Minimal Rescue | The floppy/USB CLI-only deployment profile.                                                           |
+| Full Install   | The complete desktop/server deployment profile.                                                       |
+| 32-bit compat  | The built-in subsystem that enables 32-bit apps to run on the 64-bit kernel (Full Install only).      |
+| COM            | Component Object Model — a binary interface standard for interprocess communication.                  |
+| HAL            | Hardware Abstraction Layer.                                                                           |
+| ADR            | Architecture Decision Record.                                                                         |
+| ABI            | Application Binary Interface — the syscall contract between kernel and userland.                      |
+| Bible          | This document. The canonical design reference for ghOSt.                                              |
+| Profile gate   | A build-time or runtime control that includes/excludes features per deployment profile.               |
+| Local-first    | Functionality that works fully offline without external services.                                     |
+| Trust boundary | A point in the architecture where privilege level or data trust level changes.                        |
+| ghOSt PE       | Preinstallation Environment — bootable image used to install ghOSt onto a target disk.                |
+| GOP            | Graphics Output Protocol — UEFI interface for framebuffer access before a GPU driver is loaded.       |
+| xHCI           | Extensible Host Controller Interface — USB 3.x host controller standard.                              |
+| HDA            | High Definition Audio — Intel's audio controller specification for PC audio hardware.                 |
+| SMP            | Symmetric Multiprocessing — using multiple CPU cores.                                                 |
+| IOMMU          | Input/Output Memory Management Unit — provides DMA address translation and device isolation.          |
+| NUMA           | Non-Uniform Memory Access — memory architecture where access latency depends on CPU-memory proximity. |
+| x2APIC         | Extended APIC mode — MSR-based, supports >255 logical processors. Required for many-core systems.     |
+| SMBIOS         | System Management BIOS — firmware tables providing hardware inventory (board, CPU, memory info).      |
+| ECC            | Error-Correcting Code memory — detects and corrects single-bit errors in server/workstation RAM.      |
+| IOAPIC         | I/O APIC — routes external hardware interrupts to Local APICs on individual CPU cores.                |
+| MCA            | Machine Check Architecture — CPU mechanism for reporting hardware errors (memory, bus, cache).        |
+| RSS            | Receive Side Scaling — NIC feature that distributes incoming packets across multiple CPU cores.       |
+| Local AI       | On-device AI inference with no cloud dependency. Cloud AI is user-opt-in only.                        |
+| UTF-8          | The canonical text encoding for ghOSt. All strings, filenames, configs, and APIs use UTF-8.           |
+| FDE            | Full-disk encryption — encrypting the entire disk at rest with a user-owned key.                      |
+| a11y           | Accessibility — designing the UX so it is usable by people with disabilities.                         |
+| HiDPI          | High dots-per-inch display support. Requires integer or fractional scaling in the compositor.         |
+| CI             | Continuous Integration — automated build, test, and verification pipeline.                            |
 
 ---
 
@@ -1332,6 +1645,8 @@ All significant architecture decisions are recorded in `/docs/decisions/` using 
 | 2026-03-07 | Added GPU-accelerated rendering architecture (Section 12.4), changelog and issues tracking                                                                                                                                                                                                                                                                                                      | AnotherLaughingMan |
 | 2026-03-07 | Added Versioning Architecture (Section 16) — OS-style versioning with separate kernel/UX tracks                                                                                                                                                                                                                                                                                                 | AnotherLaughingMan |
 | 2026-03-07 | Gap audit: added C coding style (7.4), text encoding (7.5), error handling (8.4), logging (8.5), user/permission model (10.4), disk encryption (10.5), ABI policy (13.2), process lifecycle (13.3), testing (15.4), CI (15.5), accessibility (12.6), multi-monitor/HiDPI (12.7), notifications (12.8), font rendering (12.9), deferred items (12.10). Expanded Appendix C to 24 open questions. | AnotherLaughingMan |
+| 2026-03-07 | Added No Scaffolding rule (Section 4.8), Driver Architecture (5.1), PCI/PCIe bus enumeration (5.2), AHCI pitfall catalog (5.3)                                                                                                                                                                                                                                                                  | AnotherLaughingMan |
+| 2026-03-07 | Expanded PCIe to full modern standard (5.2.1–5.2.5: ECAM, capability structures, enumeration, error handling). Added modern platform standards (5.4): IOMMU, APIC/x2APIC, NUMA, SMBIOS, ECC, hardware watchdog, headless/serial, network boot, high-speed NICs. Expanded Full Install Profile for server deployments. Updated Appendix C to 27 open questions.                                  | AnotherLaughingMan |
 
 ### Appendix C: Open Questions (To Be Decided)
 
@@ -1357,9 +1672,9 @@ These are known areas that need formal decisions (future ADRs):
 
 **Networking & Services:** 19. Networking stack: scope and phasing? 20. Package management / software distribution: package format, repository model?
 
-**Hardware & Drivers:** 21. Virtualization subsystem: hypervisor type and integration? 22. GPU driver target: AMD AMDGPU open specs as first target?
+**Hardware & Drivers:** 21. Virtualization subsystem: hypervisor type and integration? 22. GPU driver target: AMD AMDGPU open specs as first target? 23. IOMMU policy: strict DMA isolation by default, or opt-in per device class? 24. NUMA allocation policy: local-first with interleave fallback, or topology-guided with affinities? 25. Server sub-profile: should Full Install have explicit "desktop" and "server" sub-profiles with different default configs?
 
-**Future:** 23. Local AI subsystem: inference runtime selection, model format, API surface, GPU/NPU dispatch? 24. Printing support: scope, driver model, and timeline?
+**Future:** 26. Local AI subsystem: inference runtime selection, model format, API surface, GPU/NPU dispatch? 27. Printing support: scope, driver model, and timeline?
 
 ---
 
