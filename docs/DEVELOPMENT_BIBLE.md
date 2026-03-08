@@ -793,6 +793,346 @@ ghOSt's privacy promise requires encryption to be a first-class architectural co
 | Boot unlock flow           | Password prompt at boot (pre-kernel or early-kernel). Must work without GUI.            |
 | Recovery                   | User-created recovery key. OS cannot recover data without user's key. No backdoors.     |
 
+### 10.6 Kernel Security Hardening Baseline
+
+The kernel must be secure by construction and hardened by default where hardware support exists. Security is not a post-release checklist item.
+
+| Hardening area        | Current position                                                                                                                                          |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| NX / XD               | **Required.** Mark data pages non-executable whenever hardware supports it.                                                                               |
+| W^X                   | **Required.** No kernel or user page may be writable and executable at the same time.                                                                     |
+| SMEP / SMAP / UMIP    | **Enable when supported.** Prevent kernel execution of user pages, restrict kernel access to user memory, and block unsafe legacy user-mode instructions. |
+| Stack canaries        | **Required** for C code where toolchain support is available. Prefer `-fstack-protector-strong` or equivalent.                                            |
+| Guard pages           | **Required** around kernel stacks where practical. Stack overflow must fault deterministically, not corrupt adjacent memory.                              |
+| User-copy boundary    | Centralize `copy_from_user` / `copy_to_user` style routines. Raw user-pointer dereference in kernel code is forbidden.                                    |
+| Zeroing policy        | Zero newly allocated user-visible pages and sanitize freed sensitive buffers.                                                                             |
+| KASLR                 | **Planned.** Kernel ASLR is desirable for installed systems; debug/minimal environments may disable it explicitly.                                        |
+| Read-only kernel data | Mark immutable kernel sections read-only after init wherever feasible.                                                                                    |
+| Panic diagnostics     | Panic path must preserve enough state for post-mortem analysis without leaking secrets unnecessarily.                                                     |
+
+**Rules:**
+
+- All kernel entry points validate pointers, lengths, alignment, and privilege expectations.
+- Syscall handlers must fail closed on malformed input.
+- Security checks belong in shared primitives, not duplicated ad hoc across subsystems.
+- A hardening feature may be temporarily disabled only for a documented bring-up reason, never by silent omission.
+
+### 10.7 Local Safety, Child Accounts, and Parental Controls
+
+ghOSt may support parental controls, but only as a **local, owner-controlled safety feature**. They are not a censorship mechanism and must never become a remote policy channel.
+
+| Principle                 | Rule                                                                                                           |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Local-only control        | Parental controls are configured locally by the device owner or administrator. No cloud account is required.   |
+| Opt-in only               | Disabled by default. No age-gating, identity verification, or jurisdiction-driven policy is baked into the OS. |
+| Per-account / per-device  | Policies apply to child accounts or specific local sessions, not globally to the entire OS by default.         |
+| No remote censorship      | No vendor-operated blacklist, remote kill switch, or forced content feed filtering.                            |
+| UX/service layer feature  | Enforcement belongs in userland services and UX policy layers. The kernel provides primitives, not ideology.   |
+| Transparent and auditable | Every restriction is visible to the local administrator and stored in editable, documented config.             |
+| Emergency override        | A parent/administrator can override or disable controls locally with explicit authentication.                  |
+| Privacy-preserving        | Activity summaries and policy logs stay local by default. No telemetry or cloud reporting.                     |
+
+**Kernel responsibilities:**
+
+- Strong account separation and privilege boundaries.
+- Reliable timekeeping for schedules and time limits.
+- Permission and sandbox primitives for app/session restrictions.
+- Audit/event hooks for local policy services.
+
+**UX/service responsibilities:**
+
+- Screen-time schedules and lockout windows.
+- Application allow/deny lists per child account.
+- Purchase/install approval workflows.
+- Web/content restrictions only through locally chosen applications or DNS/filtering services configured by the owner.
+
+**Non-negotiable boundary:** ghOSt will not hardcode third-party moral, political, or commercial content restrictions into the OS. Parental controls are for the machine owner to manage their own household, not for outsiders to govern the device.
+
+### 10.8 User-Space Security, Threat Detection, and Trust Model
+
+ghOSt needs built-in security that ordinary users can actually use. That means the security model must be understandable, local-first, and technically honest about what it can detect.
+
+#### 10.8.1 Security Goals
+
+- Prevent untrusted applications from silently gaining dangerous access.
+- Make security state visible and understandable to non-expert users.
+- Detect known threats locally without requiring vendor telemetry.
+- Reduce the blast radius of unknown threats through sandboxing, permissions, isolation, and exploit mitigations.
+- Avoid turning "security" into a pretext for OS-level censorship or remote control.
+
+#### 10.8.2 What Built-In Security Should Include
+
+| Capability                    | Current position                                                                                   |
+| ----------------------------- | -------------------------------------------------------------------------------------------------- |
+| Application trust prompts     | **Required.** Elevated or unusual permissions require clear, human-readable consent.               |
+| Package / binary verification | **Required.** Verify signatures, hashes, and provenance where available.                           |
+| Quarantine / first-run policy | **Planned.** Newly downloaded or externally sourced binaries may run in a restricted mode first.   |
+| Local malware scanning        | **Planned.** On-demand and scheduled scanning with local signature databases and heuristics.       |
+| Sandboxed execution           | **Required direction.** Unknown or low-trust applications should be able to run with tight limits. |
+| Security event logging        | **Required.** Security-relevant actions generate local audit events visible to the user/admin.     |
+| Security posture dashboard    | **Planned.** UX exposes system hardening, update state, scan state, and recent alerts.             |
+| Remediation workflow          | **Planned.** Quarantine, block, allow-once, trust permanently, view details, export report.        |
+
+#### 10.8.3 Threat Intelligence: Known Threats vs Unknown Threats
+
+There is an important distinction:
+
+- **Known threats** can be matched against signatures, hashes, IOC feeds, CVE/KEV databases, YARA rules, package advisories, and certificate revocation data.
+- **Unknown threats / true 0-days** are not in a database yet by definition. They must be mitigated through behavior-based detection, sandboxing, exploit hardening, least privilege, and fast update response.
+
+**Rule:** ghOSt must never claim that a "0-day database" provides protection against unknown exploits. That is not technically honest.
+
+#### 10.8.4 Detection Strategy
+
+ghOSt's built-in protection should be layered:
+
+| Layer                     | Purpose                                                                                                                                        |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hardening                 | Stop exploit classes before detection matters: NX, W^X, sandboxing, permission gates, isolation.                                               |
+| Reputation / provenance   | Identify where software came from: signed package, trusted repository, local build, unknown binary.                                            |
+| Signature / IOC matching  | Detect known malware, known bad hashes, known bad URLs/domains, YARA-style rules.                                                              |
+| Heuristic / behavioral    | Flag suspicious actions: persistence injection, privilege escalation attempts, mass file encryption, process hollowing, unusual API sequences. |
+| Containment               | Restrict what a suspicious process can touch even before a final verdict exists.                                                               |
+| Human-visible remediation | Give the user/admin an actionable explanation, not just a red warning banner.                                                                  |
+
+**Initial direction:**
+
+- Use **signatures and open threat data** for known threats.
+- Use **heuristics/behavioral rules** for suspicious activity.
+- Use **sandboxing and permissions** as the primary defense against unknown threats.
+- Keep any cloud-assisted analysis **disabled by default** and fully optional if ever introduced.
+
+#### 10.8.5 Open Data Sources (Known Threats Only)
+
+The project may consume open or openly licensed threat data for known issues and indicators, provided updates remain local-first and user-controllable.
+
+Candidate source categories:
+
+- **CVE / vulnerability metadata:** NVD, CVE.org, OSV.dev
+- **Known exploited vulnerability lists:** CISA KEV
+- **YARA / IOC feeds:** community-maintained YARA rules, Abuse.ch-style IOC feeds where licensing permits
+- **Package ecosystem advisories:** GitHub Security Advisories, distro/package advisories, language ecosystem advisories
+- **Certificate / signing trust data:** revocation lists and trusted publisher metadata
+
+**Constraints:**
+
+- Feed ingestion must be transparent, documented, and optionally user-managed.
+- The system must continue functioning without live feed access.
+- A stale feed must degrade detection quality, not break execution of the OS.
+- Feed data is for **known threats**, not a claim of 0-day discovery.
+
+#### 10.8.6 Heuristics and Behavioral Detection
+
+Heuristics are necessary, but false positives destroy trust if handled badly.
+
+| Principle                    | Rule                                                                                      |
+| ---------------------------- | ----------------------------------------------------------------------------------------- |
+| Explainability               | Every heuristic alert should explain what behavior triggered it in human-readable terms.  |
+| Confidence tiers             | Alerts should be categorized: informational, suspicious, high risk, blocked.              |
+| No silent destructive action | The system should not delete user data automatically based on a weak heuristic verdict.   |
+| Quarantine over deletion     | Default remediation is containment/quarantine, not permanent destruction.                 |
+| Local override               | The local administrator can review and override detections with explicit acknowledgement. |
+| Auditability                 | Security decisions are logged locally with rule source, timestamp, and action taken.      |
+
+Examples of behaviors worth flagging:
+
+- process injecting code into another process;
+- unsigned binary attempting persistence in startup/service locations;
+- unexpected encryption of large numbers of user files;
+- a low-trust process repeatedly requesting elevated permissions;
+- an application suddenly opening raw disk, credential, or debugger interfaces without clear user intent.
+
+### 10.9 System Update Architecture
+
+ghOSt is not a static artifact. It needs a trustworthy servicing model for kernel fixes, security patches, feature updates, and package/application updates without turning updates into a control mechanism over the user.
+
+#### 10.9.1 Update Principles
+
+- **User control first.** No forced cloud-managed updates as a condition of using the OS.
+- **Security updates must be easy, fast, and trustworthy.** Fast patching is part of the security model.
+- **Updates must be recoverable.** A failed update must not brick the machine.
+- **System updates and application updates are related but distinct.** Kernel/OS servicing must not be coupled to every application package decision.
+- **Offline and local workflows must exist.** An update system that requires vendor connectivity contradicts the project mission.
+
+#### 10.9.2 Update Classes
+
+| Update class       | Scope                                                                | Typical reboot requirement                          |
+| ------------------ | -------------------------------------------------------------------- | --------------------------------------------------- |
+| Security update    | Kernel fixes, driver fixes, core libraries, signatures/IOC feeds     | Usually yes for kernel/boot; no for data-only feeds |
+| Kernel update      | Kernel image, boot-critical drivers, low-level ABI-impacting changes | Yes                                                 |
+| Feature update     | New OS capabilities, new system services, UX shell changes           | Sometimes                                           |
+| Package/app update | Userland applications, tools, optional components                    | Usually no                                          |
+| Data update        | Threat feeds, certificate bundles, time zone data, metadata          | No                                                  |
+
+#### 10.9.3 OS Update Delivery Model
+
+**Default direction:** ghOSt should support **atomic system updates** for the base OS and **separate package updates** for optional software.
+
+| Component              | Direction                                                                                     |
+| ---------------------- | --------------------------------------------------------------------------------------------- |
+| Base OS image          | Versioned, signed system image or component set for kernel, boot artifacts, and core system   |
+| Update format          | Signed manifest plus payloads (full and/or delta)                                             |
+| Integrity verification | Verify signatures, hashes, version constraints, and target slot/state before applying         |
+| Install strategy       | Prefer staged install into an inactive target (A/B or equivalent) over in-place mutation      |
+| Activation point       | Boot manager flips to the new slot/config only after update verification succeeds             |
+| Rollback               | Automatic fallback to previous known-good boot target on boot failure or health-check failure |
+| Recovery path          | Minimal Rescue / recovery partition can repair or roll back a broken install                  |
+
+**A/B-style updates are preferred** for the installed OS because they are safer than patching the live root in place.
+
+#### 10.9.4 Kernel and Boot Updates
+
+Kernel updates are the highest-risk update class because failure can make the whole system unbootable.
+
+Rules:
+
+- Kernel, initramfs/boot support files, and boot-critical drivers update as a **coordinated boot set**.
+- A new kernel is written to the inactive target/slot first.
+- The boot manager keeps the previous bootable kernel entry until the new one has booted successfully.
+- First boot after a kernel update runs a health check and marks the slot good only after success.
+- If boot fails, the boot manager must automatically fall back to the last known-good entry.
+- Security-only kernel patches still follow the same rollback-safe path. "It's just a patch" is not a reason to skip safety.
+
+#### 10.9.5 Security Updates and Response Cadence
+
+Security updates need their own servicing expectations:
+
+| Area                   | Requirement                                                                 |
+| ---------------------- | --------------------------------------------------------------------------- |
+| Out-of-band updates    | Supported for urgent security fixes.                                        |
+| Feed/signature updates | May update independently of full OS updates.                                |
+| Advisory metadata      | Security Center shows severity, affected components, and remediation state. |
+| Reboot communication   | If a reboot is required, explain why clearly.                               |
+| Deferral policy        | Users may defer, but high-risk unresolved issues must remain visible.       |
+
+ghOSt should prefer **fast local delivery of signed security fixes** over large monolithic release trains when possible.
+
+#### 10.9.6 Update Channels
+
+| Channel | Purpose                                               | Risk profile |
+| ------- | ----------------------------------------------------- | ------------ |
+| Stable  | General users and production systems                  | Lowest       |
+| Preview | Early validation of upcoming releases                 | Medium       |
+| Dev     | Fast-moving builds for active development and testers | Highest      |
+
+Rules:
+
+- Channel selection is explicit and user-controlled.
+- Stable must never silently become Preview or Dev.
+- Security feed updates may remain on Stable even when feature channel is conservative.
+- Minimal Rescue media should be updatable too, but with a simpler, more manual workflow.
+
+#### 10.9.7 User Control and Policy
+
+ghOSt rejects coercive update policy.
+
+| Policy area            | Current position                                                                    |
+| ---------------------- | ----------------------------------------------------------------------------------- |
+| Automatic checks       | Allowed and configurable. Must be disableable.                                      |
+| Automatic download     | Allowed and configurable. Off by default is acceptable in privacy-sensitive setups. |
+| Automatic install      | Allowed only when explicitly enabled by the owner/admin.                            |
+| Forced reboot          | Not allowed by default. Reboots require explicit scheduling or consent.             |
+| Admin control          | Local administrator controls update policy.                                         |
+| Enterprise/server mode | Longer maintenance windows, staged rollout, and manual approval must be possible.   |
+
+#### 10.9.8 Update Provenance and Trust
+
+- Every OS update is signed.
+- Signing keys and trust roots are versioned and documented.
+- Trust root rotation must be supported with overlap and recovery planning.
+- The system must clearly distinguish:
+  - official ghOSt updates;
+  - locally built/test-signed updates;
+  - third-party repositories or package sources.
+- Update logs remain local by default and exportable by the user.
+
+#### 10.9.9 Package Updates vs System Updates
+
+The package manager is not the whole OS updater.
+
+- **System updates** manage the base operating system: bootloader, kernel, core services, security data, and bundled system UX.
+- **Package updates** manage optional software installed on top.
+- The system must support updating one without forcing the other when technically possible.
+- ABI and compatibility checks must prevent userland packages from being silently broken by incompatible kernel/OS updates.
+
+#### 10.9.10 Failure and Recovery Model
+
+Update failure is expected and must be designed for.
+
+| Failure case                    | Required response                                                                    |
+| ------------------------------- | ------------------------------------------------------------------------------------ |
+| Download interrupted            | Resume or discard cleanly. Never leave partial payload mistaken as complete.         |
+| Signature verification fails    | Reject update, log locally, preserve current system state.                           |
+| Install interrupted             | Remain bootable on previous slot/target.                                             |
+| First boot of new version fails | Automatic fallback to previous known-good version.                                   |
+| Post-boot health check fails    | Mark updated slot bad and revert on next boot.                                       |
+| User reports regression         | Manual rollback path must exist from recovery environment and, if possible, from UX. |
+
+#### 10.9.11 Update Manifest and Metadata Requirements
+
+The update manifest is the contract between the release process, the updater, and the boot path. It must be explicit enough to validate safety before any payload is applied.
+
+| Manifest field           | Purpose                                                                                         |
+| ------------------------ | ----------------------------------------------------------------------------------------------- |
+| Product / profile        | Identifies whether the payload targets Minimal Rescue, Full Install, or a specific sub-profile. |
+| Current version range    | Declares which installed versions may apply the update.                                         |
+| Target version           | Identifies the resulting system version after successful activation.                            |
+| Channel                  | Stable, Preview, or Dev. Prevents channel confusion or downgrade surprises.                     |
+| Payload digests          | Hashes for each payload object and for the manifest itself.                                     |
+| Signature chain          | Signing identity, trust root identifier, and any intermediate signer metadata.                  |
+| Reboot class             | No reboot, userland restart, scheduled reboot, or mandatory reboot for activation.              |
+| Boot-set contents        | Explicit list of kernel, bootloader, initramfs, and boot-critical drivers included together.    |
+| Migration steps          | Any schema, config, or data migrations required before or after activation.                     |
+| Rollback policy          | Whether rollback is supported, blocked, or gated by a data-format barrier.                      |
+| Minimum recovery version | Lowest recovery environment version that can repair or roll back this update safely.            |
+
+Rules:
+
+- The updater must reject a manifest with missing required fields, mismatched channel, invalid signatures, or incompatible version bounds.
+- Manifest evaluation must occur before writing to the inactive slot.
+- A manifest may describe multiple payload classes, but it must label them separately so the UX can present them honestly.
+
+#### 10.9.12 Installed-System Layout and Health State
+
+Installed systems should model updates around explicit state, not guesswork.
+
+| Element              | Direction                                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------------------------- |
+| Slot A / Slot B      | Preferred for installed Full Install systems. One active slot, one inactive target.                     |
+| Recovery environment | Separate Minimal Rescue or recovery image capable of repair, rollback, and log export.                  |
+| Shared user data     | Kept outside the bootable system slot where possible to avoid clobbering user state during OS rollback. |
+| Boot health marker   | Written only after successful boot, storage mount, and basic service health checks.                     |
+| Attempt counter      | Limits repeated failed boots before automatic fallback.                                                 |
+| Known-good pointer   | Boot manager stores the last verified boot target independently from the pending target.                |
+
+Health checks should stay minimal and deterministic. The first implementation should verify:
+
+- the kernel reached userland init successfully;
+- required system partitions mounted read-write or read-only as expected;
+- boot-critical services started far enough to declare the slot viable; and
+- rollback metadata was updated without corruption.
+
+The boot health path must not depend on the full GUI. Headless/server installs need the same safety model.
+
+#### 10.9.13 Servicing Implementation Phases
+
+The servicing stack should be built in layers. Attempting the final UX before the boot and trust model exists would be backward.
+
+| Phase band | Servicing deliverable                                                                                                                                                              |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Phase 0–1  | Build tooling emits versioned artifacts and test-signed manifests. Release process can produce deterministic payload metadata.                                                     |
+| Phase 2–4  | Boot path grows slot state, boot-set version tracking, health markers, and automatic fallback rules. Recovery environment can inspect slot state.                                  |
+| Phase 5–6  | Userland updater service can download or ingest signed bundles, verify manifests, stage payloads, and record local audit logs. Data/feed updates become independently refreshable. |
+| Phase 7–8  | Boot Manager and ghOSt PE integrate rollback selection, offline repair, and channel-aware activation rules.                                                                        |
+| Phase 10+  | GUI Update Center adds scheduling, release-note presentation, rollback entry points, and richer maintenance controls.                                                              |
+| Future     | Delta payloads, key-rotation workflows, staged rollout rings, and optional fleet policy layers may be added without breaking local control.                                        |
+
+**Initial non-goals:**
+
+- no mandatory cloud dependency for update discovery or approval;
+- no live kernel patching in the first servicing design;
+- no hidden firmware updates bundled under ordinary OS patch labels.
+
 ---
 
 ## 11. Configuration Architecture
@@ -931,7 +1271,135 @@ Accessibility is not a feature gate — it is a property of the UX architecture.
 | Default font       | Ship at least one high-quality open-source font (e.g., Noto, Inter, or similar). |
 | Bitmap fallback    | Early boot uses a simple bitmap font. No TrueType dependency in kernel.          |
 
-### 12.10 Deferred UX Items (Documented for Future)
+### 12.10 Parental Controls & Family Safety UX
+
+Parental controls are a UX and policy-service feature built on top of the security model in Section 10.7.
+
+| Feature              | Current position                                                                                         |
+| -------------------- | -------------------------------------------------------------------------------------------------------- |
+| Child account mode   | **Planned.** Child accounts have a simplified UX and policy surface.                                     |
+| Time limits          | **Planned.** Per-account schedules, bedtime windows, and session duration caps.                          |
+| App restrictions     | **Planned.** Allow/deny lists by app identity, package, or signer.                                       |
+| Install approvals    | **Planned.** Child accounts require administrator approval for installs/updates.                         |
+| Web/content controls | **Optional.** Implemented through local policy services or selected apps, never mandatory OS blacklists. |
+| Activity reporting   | **Local only.** Usage summaries stay on-device unless the user explicitly exports them.                  |
+| Tamper resistance    | **Required.** Child accounts cannot disable their own restrictions without admin credentials.            |
+
+The family-safety surface must clearly distinguish:
+
+- local parental policy chosen by the device owner;
+- application-level content controls chosen by the user; and
+- prohibited OS-level censorship, which ghOSt rejects.
+
+### 12.11 Security UX & Security Center
+
+Built-in security is only useful if users can understand what the system is doing and make sane decisions without reading a reverse-engineering manual.
+
+| Feature              | Current position                                                                                                            |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Security dashboard   | **Planned.** One place to view update status, hardening status, scanner state, recent alerts, and trust decisions.          |
+| Permission prompts   | **Required.** Prompts must describe the concrete capability being requested and why it matters.                             |
+| Trust labels         | **Planned.** Apps/binaries show trust origin: signed package, trusted repo, local build, unknown download, removable media. |
+| Scan controls        | **Planned.** Quick scan, full scan, custom scan, scheduled scan, and per-path exclusions with admin approval.               |
+| Alert triage         | **Planned.** Users can inspect evidence, view triggered rule(s), quarantine, block, allow once, or trust permanently.       |
+| Remediation guidance | **Required.** Alerts should explain next steps in plain language, not only technical jargon.                                |
+| Security history     | **Planned.** Local event timeline for detections, overrides, quarantines, and important policy changes.                     |
+| Quiet mode           | **Planned.** Suppress low-priority noise while never hiding high-risk events.                                               |
+
+**Usability rules:**
+
+- Do not train users to click through meaningless warnings.
+- A security prompt that appears too often is a design failure.
+- Use progressive disclosure: simple summary first, technical detail on demand.
+- Security UI must distinguish between **known malicious**, **suspicious**, **untrusted**, and **merely unsigned**.
+- The system should prefer clear default actions over panic-inducing messaging.
+
+### 12.12 Update UX & Servicing Experience
+
+Updates are a security feature, a reliability feature, and a trust feature. The UX must make them understandable and controllable.
+
+| Feature               | Current position                                                                                                             |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Update dashboard      | **Planned.** Show current OS version, channel, pending updates, restart requirements, and rollback state.                    |
+| Update categories     | **Required.** Clearly distinguish security updates, kernel updates, feature updates, package updates, and data/feed updates. |
+| Scheduling            | **Planned.** Users/admins can choose install windows and reboot windows.                                                     |
+| Release notes         | **Required.** Summaries must explain what changed and whether reboot is needed.                                              |
+| Rollback entry point  | **Planned.** Show whether rollback is available and how to trigger it.                                                       |
+| Deferral controls     | **Required.** Users can postpone non-critical updates; deferred security risk remains visible.                               |
+| Server/admin controls | **Planned.** Maintenance windows, staged rollout, and approval gates for server deployments.                                 |
+| Offline updates       | **Planned.** Install signed update bundles from removable media or local network sources.                                    |
+
+**UX rules:**
+
+- Never hide reboot requirements.
+- Never bundle a major feature change under the label of a security patch.
+- Do not nag users with constant update prompts when nothing urgent is pending.
+- Explain why an update matters: security, stability, compatibility, or feature addition.
+- A failed update must present clear recovery instructions, not a generic error code.
+
+#### 12.12.1 Desktop Update Flow
+
+The desktop flow should be understandable in one glance and detailed on demand.
+
+| Stage              | UX requirement                                                                         |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| Status overview    | Show installed version, selected channel, last check time, and current risk state.     |
+| Update list        | Group pending items by category: security, kernel, feature, package, data.             |
+| Decision point     | Present install now, schedule, defer, or view details depending on policy and urgency. |
+| Activation notice  | Explain whether restart is needed and what will happen at the next boot.               |
+| Post-install state | Show success, pending reboot, rollback availability, or failure with next steps.       |
+
+Desktop UX rules:
+
+- Default view is summary-first, detail-second.
+- The main call to action must be truthful: `Restart to apply kernel update` is acceptable; `Optimize system` is not.
+- Security-only data updates that do not require reboot should avoid interruptive prompts.
+
+#### 12.12.2 Server and Headless Update Flow
+
+Full Install server deployments and headless systems cannot depend on a compositor.
+
+| Surface             | Requirement                                                                                                           |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| CLI / TUI status    | A text-first update command or dashboard must show channel, pending updates, reboot state, and rollback availability. |
+| Maintenance windows | Admins can define install and reboot windows separately.                                                              |
+| Approval gates      | Kernel and feature updates may require explicit approval in server policy mode.                                       |
+| Remote operators    | Logs and update state must be readable over serial, SSH-equivalent, or local console paths.                           |
+| Failure handling    | Recovery instructions must be printable/loggable without GUI dependency.                                              |
+
+Server UX must optimize for predictability over polish. Surprise restarts are defects.
+
+#### 12.12.3 Minimal Rescue and Offline Update Flow
+
+Minimal Rescue must be able to service or repair a Full Install system even when the main install is unhealthy.
+
+| Scenario                   | Required behavior                                                                                                 |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Offline update bundle      | Validate signature, inspect target version, and apply to inactive slot or media target.                           |
+| Rollback from recovery     | Present known-good targets clearly and allow explicit rollback.                                                   |
+| Broken primary install     | Recovery environment can inspect boot logs, slot state, and manifest history without mounting user data unsafely. |
+| Minimal Rescue self-update | Simpler, explicit workflow with checksum/signature verification and clear media replacement instructions.         |
+
+Offline UX must assume no network, no browser, and possibly no graphics acceleration.
+
+#### 12.12.4 Notification and Reboot Language Rules
+
+- The system must say **what** is changing, **why** it matters, and **when** it takes effect.
+- Reboot prompts must distinguish between `restart recommended` and `restart required to activate installed kernel`.
+- Deferred high-severity security updates remain visible until resolved or explicitly suppressed by policy.
+- If rollback is blocked by a data-format migration, the UX must say so before install begins.
+- Error text must include the recovery path: retry, inspect logs, boot previous slot, or enter Minimal Rescue.
+
+#### 12.12.5 Rollback and Failure UX
+
+| Situation                 | UX expectation                                                                             |
+| ------------------------- | ------------------------------------------------------------------------------------------ |
+| Update staged, not booted | Show pending activation and give user/admin a chance to postpone reboot.                   |
+| First boot fallback       | Explain that the system reverted automatically and preserve the failure reason.            |
+| Manual rollback available | Show target version, age of snapshot/slot, and likely consequences before confirmation.    |
+| Rollback unavailable      | Explain the exact blocker: migration barrier, missing recovery image, or overwritten slot. |
+
+### 12.13 Deferred UX Items (Documented for Future)
 
 These are acknowledged as real requirements but are explicitly deferred beyond initial GUI delivery:
 
@@ -1647,6 +2115,10 @@ All significant architecture decisions are recorded in `/docs/decisions/` using 
 | 2026-03-07 | Gap audit: added C coding style (7.4), text encoding (7.5), error handling (8.4), logging (8.5), user/permission model (10.4), disk encryption (10.5), ABI policy (13.2), process lifecycle (13.3), testing (15.4), CI (15.5), accessibility (12.6), multi-monitor/HiDPI (12.7), notifications (12.8), font rendering (12.9), deferred items (12.10). Expanded Appendix C to 24 open questions. | AnotherLaughingMan |
 | 2026-03-07 | Added No Scaffolding rule (Section 4.8), Driver Architecture (5.1), PCI/PCIe bus enumeration (5.2), AHCI pitfall catalog (5.3)                                                                                                                                                                                                                                                                  | AnotherLaughingMan |
 | 2026-03-07 | Expanded PCIe to full modern standard (5.2.1–5.2.5: ECAM, capability structures, enumeration, error handling). Added modern platform standards (5.4): IOMMU, APIC/x2APIC, NUMA, SMBIOS, ECC, hardware watchdog, headless/serial, network boot, high-speed NICs. Expanded Full Install Profile for server deployments. Updated Appendix C to 27 open questions.                                  | AnotherLaughingMan |
+| 2026-03-07 | Added kernel security hardening baseline (10.6), local-only parental controls and child-account policy (10.7), family safety UX surface (12.10), and related tracked issues. Updated Appendix C to 29 open questions.                                                                                                                                                                           | AnotherLaughingMan |
+| 2026-03-07 | Added user-space security and threat-detection model (10.8), including realistic treatment of known threats vs true 0-days, plus Security Center UX (12.11). Updated Appendix C to 31 open questions.                                                                                                                                                                                           | AnotherLaughingMan |
+| 2026-03-07 | Added system update architecture and servicing model (10.9), including update classes, channels, A/B-style rollback, kernel/security update handling, and Update UX (12.12). Updated Appendix C to 33 open questions.                                                                                                                                                                           | AnotherLaughingMan |
+| 2026-03-07 | Expanded update design with manifest requirements, slot/health-state model, phased servicing implementation plan, and concrete desktop/server/recovery UX flows for servicing and rollback.                                                                                                                                                                                                     | AnotherLaughingMan |
 
 ### Appendix C: Open Questions (To Be Decided)
 
@@ -1664,17 +2136,17 @@ These are known areas that need formal decisions (future ADRs):
 8. Power management: sleep/wake states (S0–S5), shutdown sequencing, lid/button handling?
 9. Time architecture: UTC internal, wall-clock conversion, NTP, monotonic vs real-time clock?
 
-**Security & Privacy:** 10. Disk encryption: FDE vs partition encryption, key derivation algorithm, boot unlock flow? 11. Update/package system: design, trust model, signed updates, A/B partitions?
+**Security & Privacy:** 10. Disk encryption: FDE vs partition encryption, key derivation algorithm, boot unlock flow? 11. Update/package system: design, trust model, signed updates, A/B partitions? 12. Kernel hardening baseline: which mitigations are mandatory in debug, rescue, and release builds (KASLR, SMEP/SMAP, stack protector, guard pages)? 13. Built-in threat detection scope: how much should ghOSt ship natively versus relying on third-party security tools? 14. Update trust roots and signing: how are release keys rotated, revoked, and recovered if compromised?
 
-**UX & Applications:** 12. UX runtime: embedded browser engine vs custom renderer? 13. Font rendering engine: FreeType vs stb_truetype vs custom? 14. COM implementation strategy: phased coverage plan? 15. 32-bit compatibility subsystem: naming, thunking strategy, and API coverage scope?
+**UX & Applications:** 15. UX runtime: embedded browser engine vs custom renderer? 16. Font rendering engine: FreeType vs stb_truetype vs custom? 17. COM implementation strategy: phased coverage plan? 18. 32-bit compatibility subsystem: naming, thunking strategy, and API coverage scope? 19. Parental controls policy: what is the minimum built-in family safety surface before crossing into unwanted censorship or complexity? 20. Security UX policy: what user-facing security decisions should be automatic, suggested, or always manual? 21. Update UX policy: when should the system auto-install, notify, defer, or require explicit approval?
 
-**Infrastructure:** 16. Test framework selection: Unity, CMocka, or custom? 17. CI pipeline: GitHub Actions configuration, smoke test design? 18. C coding style: confirm or amend the conventions in Section 7.4?
+**Infrastructure:** 22. Test framework selection: Unity, CMocka, or custom? 23. CI pipeline: GitHub Actions configuration, smoke test design? 24. C coding style: confirm or amend the conventions in Section 7.4?
 
-**Networking & Services:** 19. Networking stack: scope and phasing? 20. Package management / software distribution: package format, repository model?
+**Networking & Services:** 25. Networking stack: scope and phasing? 26. Package management / software distribution: package format, repository model?
 
-**Hardware & Drivers:** 21. Virtualization subsystem: hypervisor type and integration? 22. GPU driver target: AMD AMDGPU open specs as first target? 23. IOMMU policy: strict DMA isolation by default, or opt-in per device class? 24. NUMA allocation policy: local-first with interleave fallback, or topology-guided with affinities? 25. Server sub-profile: should Full Install have explicit "desktop" and "server" sub-profiles with different default configs?
+**Hardware & Drivers:** 27. Virtualization subsystem: hypervisor type and integration? 28. GPU driver target: AMD AMDGPU open specs as first target? 29. IOMMU policy: strict DMA isolation by default, or opt-in per device class? 30. NUMA allocation policy: local-first with interleave fallback, or topology-guided with affinities? 31. Server sub-profile: should Full Install have explicit "desktop" and "server" sub-profiles with different default configs?
 
-**Future:** 26. Local AI subsystem: inference runtime selection, model format, API surface, GPU/NPU dispatch? 27. Printing support: scope, driver model, and timeline?
+**Future:** 32. Local AI subsystem: inference runtime selection, model format, API surface, GPU/NPU dispatch? 33. Printing support: scope, driver model, and timeline?
 
 ---
 

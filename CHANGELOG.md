@@ -40,6 +40,7 @@ See the [Development Bible](docs/DEVELOPMENT_BIBLE.md) Section 16 for the full v
 #### Changed
 
 - License selected: **GPL-3.0-or-later**. The project now uses strong copyleft to protect user sovereignty, privacy, and anti-censorship goals.
+- System servicing design expanded with manifest requirements, slot health-state rules, phased implementation milestones, and concrete desktop/server/recovery update UX flows.
 
 ---
 

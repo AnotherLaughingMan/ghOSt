@@ -360,7 +360,39 @@ This document tracks known issues, planned work items, and open questions for th
 | Created  | 2026-03-07         |
 | Assignee | AnotherLaughingMan |
 
-**Description:** Design how the OS updates itself safely. Consider A/B partitions, recovery fallback, signed updates, and the trust model for update distribution. Critical for a privacy-focused OS. See Bible Appendix C.
+**Description:** Design how ghOSt updates itself safely over time. Scope includes: kernel updates, security updates, feature updates, data/feed updates, update channels (Stable/Preview/Dev), A/B or equivalent rollback-safe installation, signed manifests and payloads, trust-root management, reboot/maintenance policy, offline update bundles, and recovery fallback. The update system must be local-first, user-controlled, and capable of fast out-of-band security response without coercive forced reboots. See Bible Section 10.9 and Appendix C, item 11.
+
+**Initial deliverables:**
+
+- manifest schema and signature-validation rules;
+- slot-state model, health-check rules, and automatic fallback behavior;
+- boot-set coordination rules for kernel, bootloader, and boot-critical drivers;
+- offline bundle format and recovery-environment repair flow;
+- trust-root rotation and revocation procedure;
+- boundary between base-system servicing and package/application updates.
+
+---
+
+### ISS-0037: Design update UX and servicing policy
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P2**             |
+| Category | `ux`               |
+| Phase    | Phase 6+           |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Design the user/admin-facing update experience: update dashboard, category labels, release notes, restart communication, scheduling, rollback entry points, deferral controls, server maintenance windows, and offline update flow. Must clearly distinguish security updates from feature updates and avoid coercive or misleading UX. See Bible Section 12.12 and Appendix C, item 21.
+
+**Initial deliverables:**
+
+- desktop Update Center flow from check to install to reboot to rollback;
+- headless/server servicing flow with maintenance windows and approval gates;
+- Minimal Rescue/offline servicing workflow for repair and rollback;
+- notification and reboot wording rules that stay technically honest;
+- failure and recovery UX that surfaces exact next steps instead of generic errors.
 
 ---
 
@@ -511,6 +543,66 @@ This document tracks known issues, planned work items, and open questions for th
 | Assignee | AnotherLaughingMan |
 
 **Description:** The ghOSt bootloader EFI binary must be loadable via PXE (TFTP/DHCP) and UEFI HTTP Boot. No binary changes required — the same EFI binary works for disk, PXE, and HTTP Boot. PE installer handles network-based install configuration. See Bible Section 5.4.8.
+
+---
+
+### ISS-0033: Define kernel security hardening baseline
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P0**             |
+| Category | `security`         |
+| Phase    | Phase 2–3          |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Define and implement the minimum kernel hardening baseline: NX/XD, W^X, centralized user-copy validation, stack canaries, guard pages, read-only kernel data after init, and hardware features such as SMEP/SMAP/UMIP when supported. Decide which mitigations are mandatory in debug, Minimal Rescue, and Full Install builds. See Bible Section 10.6 and Appendix C, item 12.
+
+---
+
+### ISS-0034: Design local parental controls and child-account policy
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P2**             |
+| Category | `ux`               |
+| Phase    | Phase 6+           |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Design a local-only parental-controls system that aligns with ghOSt's anti-censorship values. Scope: child accounts, time limits, app restrictions, install approvals, tamper resistance, and optional local web/content controls through user-selected services or apps. Must not require cloud accounts, telemetry, age verification, or vendor-operated blacklists. See Bible Sections 10.7 and 12.10, plus Appendix C, item 17.
+
+---
+
+### ISS-0035: Design built-in threat detection and trust model
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P1**             |
+| Category | `security`         |
+| Phase    | Phase 5–6          |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Define ghOSt's built-in user-space security model: application trust prompts, binary/package verification, quarantine behavior, local malware scanning, heuristic/behavioral detection, and integration of open threat feeds for known threats. The design must explicitly distinguish known-threat intelligence from true 0-day detection, and must remain local-first with no mandatory cloud dependency. See Bible Section 10.8 and Appendix C, item 13.
+
+---
+
+### ISS-0036: Design Security Center UX and remediation flow
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P2**             |
+| Category | `ux`               |
+| Phase    | Phase 6+           |
+| Created  | 2026-03-07         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Design the graphical security experience: dashboard, permission prompts, trust labels, scan controls, alert triage, remediation actions, security history, and quiet mode. Prompts and alerts must be understandable to normal users, avoid constant warning fatigue, and clearly distinguish known malicious, suspicious, untrusted, and unsigned. See Bible Section 12.11 and Appendix C, item 19.
 
 ---
 
