@@ -68,6 +68,8 @@ ghOSt is not a Linux distribution, not a fork of an existing OS, and not a wrapp
 
 **Native architecture: 64-bit (x86-64).** The kernel, drivers, and all system services run natively in 64-bit mode. A built-in 32-bit compatibility subsystem (name TBD) enables 32-bit application execution on the Full Install Profile, similar in concept to how Windows runs 32-bit apps on 64-bit — but with ghOSt's own design and branding.
 
+**Kernel architecture:** ghOSt uses a **microkernel architecture**. The privileged kernel stays intentionally small; drivers, filesystems, and higher-level OS services run as user-space servers unless a narrowly documented exception is required.
+
 ---
 
 ## 2. Why ghOSt Exists
@@ -200,20 +202,20 @@ Kernel code is too sensitive for placeholder implementations. Every function tha
 │  └─────┬─────┘  └────┬─────┘  └────────┬─────────┘  │
 │        │              │                 │             │
 │  ┌─────┴──────────────┴─────────────────┴──────────┐ │
-│  │            System Services / APIs                │ │
-│  │         (COM runtime, IPC, config, etc.)         │ │
+│  │      User-Space System Servers / APIs            │ │
+│  │   (VFS, drivers, COM runtime, config, etc.)      │ │
 │  └──────────────────────┬──────────────────────────┘ │
 ├─────────────────────────┼────────────────────────────┤
 │                   Kernel Space                       │
 │  ┌──────────────────────┴──────────────────────────┐ │
-│  │              Kernel Core (C + Assembly)          │ │
+│  │               Microkernel (C + Assembly)         │ │
 │  │  ┌──────────┐  ┌──────────┐  ┌───────────────┐ │ │
 │  │  │ Memory   │  │ Scheduler│  │ IPC / Syscall  │ │ │
 │  │  │ Manager  │  │          │  │ Interface      │ │ │
 │  │  └──────────┘  └──────────┘  └───────────────┘ │ │
 │  │  ┌──────────┐  ┌──────────┐  ┌───────────────┐ │ │
-│  │  │ VFS      │  │ Security │  │ Device Manager │ │ │
-│  │  │          │  │ Module   │  │                │ │ │
+│  │  │ IRQ /    │  │ Security │  │ Kernel Object  │ │ │
+│  │  │ VM Core  │  │ Boundary │  │ Model          │ │ │
 │  │  └──────────┘  └──────────┘  └───────────────┘ │ │
 │  └─────────────────────────────────────────────────┘ │
 │  ┌─────────────────────────────────────────────────┐ │
@@ -231,26 +233,53 @@ Kernel code is too sensitive for placeholder implementations. Every function tha
 This diagram is aspirational and will evolve. Not all components exist yet.
 The layering is intentional: each boundary is a potential security and modularity boundary.
 
+### 5.0 Kernel Architecture Decision
+
+ghOSt uses a **microkernel**. This decision is recorded in `ADR-0002` and is now a project constraint.
+
+The kernel is responsible for only the minimal privileged mechanisms:
+
+- interrupt and exception handling;
+- address-space management and low-level memory primitives;
+- scheduling and context switching;
+- IPC and syscall entry;
+- capability/handle enforcement and kernel object ownership.
+
+The following belong in user space as servers or trusted system services, not inside the kernel by default:
+
+- device drivers;
+- filesystems and storage stack logic above the minimal hardware-control boundary;
+- networking stack services;
+- higher-level device management and policy;
+- compatibility layers and most service daemons.
+
+This choice intentionally favors fault isolation and explicit trust boundaries over a simpler monolithic bring-up.
+
 ### 5.1 Driver Model
 
-ghOSt uses a **register-probe-attach** driver model. Every driver is a kernel-mode module that:
+ghOSt uses a **register-probe-attach** driver model, but under the microkernel architecture drivers are **user-space driver servers** by default, not kernel-mode modules.
 
-1. **Registers** itself with the Device Manager, declaring which bus types and device IDs it can handle.
+1. **Registers** itself with the device-management service, declaring which bus types and device IDs it can handle.
 2. **Probes** a candidate device when the bus enumerator discovers a matching device. Probe must be non-destructive — it verifies the device is actually present and compatible, then returns success or failure.
-3. **Attaches** to the device on successful probe, taking ownership of that device's resources (MMIO regions, IRQs, DMA channels).
+3. **Attaches** to the device on successful probe, receiving controlled access to that device's resources (MMIO regions, IRQs, DMA channels) through kernel-managed handles/capabilities.
 
-| Principle                   | Rule                                                                                                  |
-| --------------------------- | ----------------------------------------------------------------------------------------------------- |
-| One driver per device       | No two drivers may claim the same device simultaneously.                                              |
-| Explicit resource ownership | A driver must request and receive exclusive access to MMIO, I/O ports, and IRQ lines from the kernel. |
-| No blind probing            | Drivers must not touch hardware registers before the bus enumerator has matched them.                 |
-| Fail-safe detach            | Every driver must implement a `detach` path that releases all resources cleanly.                      |
-| No blocking in probe        | Probe must complete quickly. Lengthy initialization happens in attach.                                |
-| DMA only through kernel API | Drivers never compute physical addresses themselves. All DMA buffers go through the kernel allocator. |
+| Principle                   | Rule                                                                                                               |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| One driver per device       | No two driver servers may claim the same device simultaneously.                                                    |
+| Explicit resource ownership | A driver server must request and receive controlled access to MMIO, I/O ports, DMA buffers, and IRQ delivery.      |
+| No blind probing            | Drivers must not touch hardware registers before the bus enumerator has matched them and the kernel grants access. |
+| Fail-safe detach            | Every driver server must release all resources cleanly on detach or crash recovery.                                |
+| Restartability              | Driver processes should be restartable without requiring a full kernel reboot whenever the hardware allows it.     |
+| No blocking in probe        | Probe must complete quickly. Lengthy initialization happens in attach.                                             |
+| DMA only through kernel API | Drivers never compute physical addresses themselves. All DMA buffers go through the kernel allocator.              |
+
+**Exceptions:** a tiny amount of kernel-resident hardware code may be necessary for interrupt routing, timer bring-up, or other early-boot primitives. Such exceptions must be explicitly documented and kept minimal.
 
 ### 5.2 Bus Enumeration (PCI/PCIe)
 
 PCI Express (PCIe) is the primary interconnect on all modern x86-64 hardware. Legacy parallel PCI is effectively dead — every AHCI controller, NVMe drive, USB host, GPU, and NIC on a modern system sits behind PCIe. ghOSt treats **PCIe as the native bus** and supports legacy PCI configuration only as a fallback for virtual machines and older hardware.
+
+**Form-factor note:** physical connector names such as **M.2** and **U.2** are not separate storage protocols. ghOSt's support is defined by the underlying bus/protocol combination: M.2 or U.2 devices that present as **NVMe over PCIe** are covered by PCIe + NVMe support, while M.2 devices that present as **SATA/AHCI** are covered by SATA/AHCI support.
 
 #### 5.2.1 PCI vs PCIe — What's Different
 
@@ -1520,16 +1549,16 @@ The process model must be designed before userland exists. It shapes everything 
 
 An OS project worked on in bursts needs automated tests as a safety net. When you come back after weeks or months, tests tell you what still works.
 
-| Layer             | Approach                                                                                           |
-| ----------------- | -------------------------------------------------------------------------------------------------- |
-| Unit tests        | Test individual functions (memory allocator, string ops, data structures) in a hosted environment  |
-| Test framework    | Lightweight C test framework (candidates: Unity, CMocka, or custom minimal). **ADR required.**     |
-| Integration tests | Test subsystem interactions (e.g., VFS + filesystem, scheduler + IPC) in QEMU                      |
-| Boot smoke test   | Automated: build image → boot in QEMU → verify serial output for expected sign-of-life strings     |
-| Regression tests  | Every bug fix adds a test that reproduces the bug. No fix without a test.                          |
-| Test location     | Test code lives adjacent to the code it tests: `kernel/mm/tests/`, `kernel/sched/tests/`, etc.     |
-| Debug vs release  | Debug builds enable assertion checks, memory poisoning, stack canaries. Release builds strip them. |
-| Hardware tests    | Manual on real hardware before milestone releases. Automated testing is QEMU-only.                 |
+| Layer             | Approach                                                                                                                                                                                         |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Unit tests        | Test individual functions (memory allocator, string ops, data structures) in a hosted environment                                                                                                |
+| Test framework    | Lightweight C test framework (candidates: Unity, CMocka, or custom minimal). **ADR required.**                                                                                                   |
+| Integration tests | Test subsystem interactions (e.g., VFS + filesystem, scheduler + IPC) in QEMU                                                                                                                    |
+| Boot smoke test   | Automated: build image → boot in QEMU → verify serial output for expected sign-of-life strings                                                                                                   |
+| Regression tests  | Every bug fix adds a test that reproduces the bug. No fix without a test.                                                                                                                        |
+| Test location     | Test code lives adjacent to the code it tests: `kernel/mm/tests/`, `kernel/sched/tests/`, etc.                                                                                                   |
+| Debug vs release  | Debug builds enable assertion checks, memory poisoning, stack canaries. Release builds strip them.                                                                                               |
+| Hardware tests    | Manual on real hardware before milestone releases. If no real hardware is available, VMware Workstation Pro 17 is an acceptable manual validation platform. Automated testing remains QEMU-only. |
 
 ### 15.5 CI Pipeline
 
@@ -1647,15 +1676,19 @@ Building an OS from scratch is one of the hardest software engineering undertaki
 
 **Goal:** Be able to compile, link, and produce bootable artifacts before writing any OS code.
 
-| Task               | Detail                                                                                       | Hard Problems                                                     |
-| ------------------ | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Cross-compiler     | Build or configure a GCC/Clang cross-compiler targeting x86-64 freestanding (no hosted libc) | Toolchain version pinning, reproducibility                        |
-| Assembler          | NASM or GNU as for Assembly sources                                                          | Syntax choice (Intel vs AT&T) — decide once                       |
-| Linker scripts     | Custom linker scripts for kernel binary layout                                               | Getting sections, alignment, and entry point right                |
-| Build system       | Makefile or CMake for reproducible builds                                                    | Must support Minimal Rescue and Full Install targets from day one |
-| Boot image tooling | Scripts to produce FAT32-formatted UEFI-bootable images (.img)                               | Image layout, partition tables, ESP structure                     |
-| Emulator/debugger  | QEMU + OVMF (UEFI firmware) for testing without real hardware                                | GDB remote debug integration for kernel                           |
-| CI pipeline        | Automated build + boot-smoke-test (future)                                                   | Reproducible across machines                                      |
+| Task               | Detail                                                                                                                                   | Hard Problems                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Cross-compiler     | Configure **Clang/LLVM** as the primary freestanding compiler targeting x86-64 (no hosted libc)                                          | Toolchain version pinning, reproducibility                        |
+| Assembler          | Use **NASM** for standalone Assembly sources                                                                                             | Keep one syntax path only: Intel syntax                           |
+| Linker scripts     | Custom linker scripts for kernel binary layout                                                                                           | Getting sections, alignment, and entry point right                |
+| Build system       | Makefile or CMake for reproducible builds                                                                                                | Must support Minimal Rescue and Full Install targets from day one |
+| Boot image tooling | Scripts to produce FAT32-formatted UEFI-bootable images (.img)                                                                           | Image layout, partition tables, ESP structure                     |
+| Emulator/debugger  | QEMU + OVMF (UEFI firmware) is the primary no-hardware path; VMware Workstation Pro 17 is an acceptable secondary/manual validation path | GDB remote debug integration favors QEMU                          |
+| CI pipeline        | Automated build + boot-smoke-test (future)                                                                                               | Reproducible across machines                                      |
+
+**Selected direction:** ghOSt standardizes on **Clang + LLD + NASM (Intel syntax)** as the primary development toolchain. Exact pinned versions and setup steps remain implementation work, but the compiler/linker/assembler direction is no longer open. See `ADR-0003`.
+
+**VM note:** QEMU + OVMF remains the canonical automation and debugging target. VMware Workstation Pro 17 is acceptable for manual UEFI bring-up and sanity checks when that is the only VM platform currently available.
 
 **Exit criteria:** Can produce a bootable `.img` that QEMU/OVMF loads and shows a sign-of-life (e.g., colored screen or serial output).
 
@@ -1674,7 +1707,9 @@ Building an OS from scratch is one of the hardest software engineering undertaki
 | Load kernel            | Load kernel binary from filesystem on boot media into memory | Need a minimal FAT32 reader or use UEFI file protocol                            |
 | Handoff structure      | Pass memory map, framebuffer info, and boot config to kernel | Define a clean boot-info struct — this is an API boundary                        |
 
-**Key decision needed:** Use GNU-EFI, POSIX-UEFI, EDK2, or write UEFI interaction from scratch?
+**Decision:** Use a minimal from-scratch UEFI application and loader path for early
+bring-up, built directly with Clang/LLD as a PE/COFF `.efi` binary. Treat EDK2 as a
+reference and optional later validation path rather than the default boot framework.
 
 **Exit criteria:** UEFI app loads, gets framebuffer + memory map, loads kernel blob, jumps to kernel entry.
 
@@ -1723,17 +1758,19 @@ Building an OS from scratch is one of the hardest software engineering undertaki
 
 **Goal:** Read and write persistent storage. This is required before any useful OS operations.
 
-| Task            | Detail                                                                                                                                                 | Hard Problems                                                                                                                                                                                                                                                                |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| AHCI driver     | SATA controller driver for hard drives/SSDs. See Section 5.3 for architecture and pitfall catalog — read it before writing a single line of AHCI code. | PCI enumeration first, IDE-to-AHCI mode switching, HBA register init sequence (5.3.1), DMA alignment (5.3.3), COMRESET timing, port stop/start ordering, error recovery with port reset, 64-bit DMA verification, ATAPI detection. Every pitfall in 5.3.2 must be addressed. |
-| NVMe driver     | NVMe controller for modern SSDs                                                                                                                        | Submission/completion queue model, PCIe config space                                                                                                                                                                                                                         |
-| Partition table | GPT parsing (UEFI standard)                                                                                                                            | Protective MBR, GUID handling                                                                                                                                                                                                                                                |
-| VFS layer       | Virtual Filesystem Switch — abstraction over concrete filesystems                                                                                      | Inode/dentry model, mount points, path resolution                                                                                                                                                                                                                            |
-| FAT32 driver    | Required for UEFI ESP and basic interop                                                                                                                | Long filename support, cluster chaining, edge cases                                                                                                                                                                                                                          |
-| Ext2/custom FS  | A real filesystem for the root partition                                                                                                               | Journal (ext3/4) adds complexity — ext2 is a simpler start                                                                                                                                                                                                                   |
-| Block cache     | Cache disk blocks in memory                                                                                                                            | Cache coherency, write-back vs write-through                                                                                                                                                                                                                                 |
+| Task               | Detail                                                                                                                                                         | Hard Problems                                                                                                                                                                                                                                                                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AHCI driver server | User-space SATA storage server for hard drives/SSDs. See Section 5.3 for architecture and pitfall catalog — read it before writing a single line of AHCI code. | PCI enumeration first, IDE-to-AHCI mode switching, HBA register init sequence (5.3.1), DMA alignment (5.3.3), COMRESET timing, port stop/start ordering, error recovery with port reset, 64-bit DMA verification, ATAPI detection, plus restart/recovery behavior across the kernel/server boundary. Every pitfall in 5.3.2 must be addressed. |
+| NVMe driver server | User-space NVMe storage server for modern SSDs                                                                                                                 | Submission/completion queue model, PCIe config space, queue ownership across IPC boundary                                                                                                                                                                                                                                                      |
+| Partition table    | GPT parsing (UEFI standard)                                                                                                                                    | Protective MBR, GUID handling                                                                                                                                                                                                                                                                                                                  |
+| VFS service        | Virtual Filesystem service — abstraction and routing layer over concrete filesystem servers                                                                    | Namespace design, mount points, path resolution, IPC overhead, capability checks                                                                                                                                                                                                                                                               |
+| FAT32 driver       | Required for UEFI ESP and basic interop                                                                                                                        | Long filename support, cluster chaining, edge cases                                                                                                                                                                                                                                                                                            |
+| Ext2/custom FS     | A real filesystem for the root partition                                                                                                                       | Journal (ext3/4) adds complexity — ext2 is a simpler start                                                                                                                                                                                                                                                                                     |
+| Block cache        | Cache disk blocks in memory                                                                                                                                    | Cache coherency, write-back vs write-through                                                                                                                                                                                                                                                                                                   |
 
-**Exit criteria:** Kernel can mount a root filesystem, read files, and write files.
+This means ghOSt's storage roadmap already covers common modern connectors: **M.2 NVMe** and **U.2 NVMe** fall under the NVMe driver path, while **M.2 SATA** falls under the AHCI path.
+
+**Exit criteria:** The storage and filesystem servers can mount a root filesystem through the microkernel IPC boundary, read files, and write files.
 
 ---
 
@@ -1741,7 +1778,7 @@ Building an OS from scratch is one of the hardest software engineering undertaki
 
 **Goal:** The minimum driver set to make the system usable on real hardware.
 
-This is one of the hardest areas. Unlike Linux (which has thousands of contributors writing drivers), ghOSt must be strategic.
+This is one of the hardest areas. Unlike Linux (which has thousands of contributors writing drivers), ghOSt must be strategic. Under the microkernel architecture, these drivers should be delivered as user-space driver servers unless a documented exception is required.
 
 | Driver class             | Initial approach                                                                 | Hard Problems                                                              |
 | ------------------------ | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
@@ -2119,6 +2156,7 @@ All significant architecture decisions are recorded in `/docs/decisions/` using 
 | 2026-03-07 | Added user-space security and threat-detection model (10.8), including realistic treatment of known threats vs true 0-days, plus Security Center UX (12.11). Updated Appendix C to 31 open questions.                                                                                                                                                                                           | AnotherLaughingMan |
 | 2026-03-07 | Added system update architecture and servicing model (10.9), including update classes, channels, A/B-style rollback, kernel/security update handling, and Update UX (12.12). Updated Appendix C to 33 open questions.                                                                                                                                                                           | AnotherLaughingMan |
 | 2026-03-07 | Expanded update design with manifest requirements, slot/health-state model, phased servicing implementation plan, and concrete desktop/server/recovery UX flows for servicing and rollback.                                                                                                                                                                                                     | AnotherLaughingMan |
+| 2026-03-08 | Accepted microkernel architecture in ADR-0002. Updated system architecture, driver model, and storage/filesystem roadmap language to reflect user-space servers rather than a monolithic kernel model.                                                                                                                                                                                          | AnotherLaughingMan |
 
 ### Appendix C: Open Questions (To Be Decided)
 
@@ -2126,27 +2164,26 @@ These are known areas that need formal decisions (future ADRs):
 
 **Architecture & Kernel:**
 
-1. Kernel architecture: monolithic vs microkernel vs hybrid?
-2. Filesystem design: custom VFS vs adopt existing?
-3. Driver model: in-kernel vs userspace drivers?
-4. Init system design: custom init, service dependencies, shutdown sequencing?
-5. Permission model: capability-based vs traditional UNIX-style?
-6. ABI freeze policy: when does the syscall interface stabilize?
-7. Swap / virtual memory policy: swap-to-disk, OOM killer, overcommit behavior?
-8. Power management: sleep/wake states (S0–S5), shutdown sequencing, lid/button handling?
-9. Time architecture: UTC internal, wall-clock conversion, NTP, monotonic vs real-time clock?
+1. Filesystem design: custom VFS vs adopt existing?
+2. Driver/server restart policy: automatic restart, manual recovery, or per-service policy?
+3. Init system design: custom init, service dependencies, shutdown sequencing?
+4. Permission model: capability-based vs traditional UNIX-style?
+5. ABI freeze policy: when does the syscall interface stabilize?
+6. Swap / virtual memory policy: swap-to-disk, OOM killer, overcommit behavior?
+7. Power management: sleep/wake states (S0–S5), shutdown sequencing, lid/button handling?
+8. Time architecture: UTC internal, wall-clock conversion, NTP, monotonic vs real-time clock?
 
-**Security & Privacy:** 10. Disk encryption: FDE vs partition encryption, key derivation algorithm, boot unlock flow? 11. Update/package system: design, trust model, signed updates, A/B partitions? 12. Kernel hardening baseline: which mitigations are mandatory in debug, rescue, and release builds (KASLR, SMEP/SMAP, stack protector, guard pages)? 13. Built-in threat detection scope: how much should ghOSt ship natively versus relying on third-party security tools? 14. Update trust roots and signing: how are release keys rotated, revoked, and recovered if compromised?
+**Security & Privacy:** 9. Disk encryption: FDE vs partition encryption, key derivation algorithm, boot unlock flow? 10. Update/package system: design, trust model, signed updates, A/B partitions? 11. Kernel hardening baseline: which mitigations are mandatory in debug, rescue, and release builds (KASLR, SMEP/SMAP, stack protector, guard pages)? 12. Built-in threat detection scope: how much should ghOSt ship natively versus relying on third-party security tools? 13. Update trust roots and signing: how are release keys rotated, revoked, and recovered if compromised?
 
-**UX & Applications:** 15. UX runtime: embedded browser engine vs custom renderer? 16. Font rendering engine: FreeType vs stb_truetype vs custom? 17. COM implementation strategy: phased coverage plan? 18. 32-bit compatibility subsystem: naming, thunking strategy, and API coverage scope? 19. Parental controls policy: what is the minimum built-in family safety surface before crossing into unwanted censorship or complexity? 20. Security UX policy: what user-facing security decisions should be automatic, suggested, or always manual? 21. Update UX policy: when should the system auto-install, notify, defer, or require explicit approval?
+**UX & Applications:** 14. UX runtime: embedded browser engine vs custom renderer? 15. Font rendering engine: FreeType vs stb_truetype vs custom? 16. COM implementation strategy: phased coverage plan? 17. 32-bit compatibility subsystem: naming, thunking strategy, and API coverage scope? 18. Parental controls policy: what is the minimum built-in family safety surface before crossing into unwanted censorship or complexity? 19. Security UX policy: what user-facing security decisions should be automatic, suggested, or always manual? 20. Update UX policy: when should the system auto-install, notify, defer, or require explicit approval?
 
-**Infrastructure:** 22. Test framework selection: Unity, CMocka, or custom? 23. CI pipeline: GitHub Actions configuration, smoke test design? 24. C coding style: confirm or amend the conventions in Section 7.4?
+**Infrastructure:** 21. Test framework selection: Unity, CMocka, or custom? 22. CI pipeline: GitHub Actions configuration, smoke test design? 23. C coding style: confirm or amend the conventions in Section 7.4?
 
-**Networking & Services:** 25. Networking stack: scope and phasing? 26. Package management / software distribution: package format, repository model?
+**Networking & Services:** 24. Networking stack: scope and phasing? 25. Package management / software distribution: package format, repository model?
 
-**Hardware & Drivers:** 27. Virtualization subsystem: hypervisor type and integration? 28. GPU driver target: AMD AMDGPU open specs as first target? 29. IOMMU policy: strict DMA isolation by default, or opt-in per device class? 30. NUMA allocation policy: local-first with interleave fallback, or topology-guided with affinities? 31. Server sub-profile: should Full Install have explicit "desktop" and "server" sub-profiles with different default configs?
+**Hardware & Drivers:** 26. Virtualization subsystem: hypervisor type and integration? 27. GPU driver target: AMD AMDGPU open specs as first target? 28. IOMMU policy: strict DMA isolation by default, or opt-in per device class? 29. NUMA allocation policy: local-first with interleave fallback, or topology-guided with affinities? 30. Server sub-profile: should Full Install have explicit "desktop" and "server" sub-profiles with different default configs?
 
-**Future:** 32. Local AI subsystem: inference runtime selection, model format, API surface, GPU/NPU dispatch? 33. Printing support: scope, driver model, and timeline?
+**Future:** 31. Local AI subsystem: inference runtime selection, model format, API surface, GPU/NPU dispatch? 32. Printing support: scope, driver model, and timeline?
 
 ---
 

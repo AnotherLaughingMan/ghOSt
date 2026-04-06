@@ -2,7 +2,7 @@
 
 > **Project:** ghOSt — [https://github.com/AnotherLaughingMan/ghOSt](https://github.com/AnotherLaughingMan/ghOSt)
 > **Owner:** AnotherLaughingMan
-> **Last updated:** 2026-03-07
+> **Last updated:** 2026-03-08
 
 This document tracks known issues, planned work items, and open questions for the ghOSt project. For architectural decisions, see `/docs/decisions/`. For the full project roadmap, see the [Development Bible](DEVELOPMENT_BIBLE.md) Section 17.
 
@@ -49,33 +49,35 @@ This document tracks known issues, planned work items, and open questions for th
 
 ## Open Issues
 
-### ISS-0002: Decide kernel architecture (monolithic vs micro vs hybrid)
-
-| Field    | Value              |
-| -------- | ------------------ |
-| Status   | **Open**           |
-| Priority | **P0**             |
-| Category | `architecture`     |
-| Phase    | Phase 0            |
-| Created  | 2026-03-07         |
-| Assignee | AnotherLaughingMan |
-
-**Description:** Fundamental architecture decision that affects every subsequent design choice. Monolithic is simpler to start, microkernel is more modular/secure, hybrid attempts to balance both. Must be decided and recorded as ADR before Phase 2 kernel work begins. See Bible Appendix C, item 1.
-
----
-
 ### ISS-0003: Select and configure cross-compiler toolchain
 
 | Field    | Value              |
 | -------- | ------------------ |
-| Status   | **Open**           |
+| Status   | **In Progress**    |
 | Priority | **P0**             |
 | Category | `toolchain`        |
 | Phase    | Phase 0            |
 | Created  | 2026-03-07         |
 | Assignee | AnotherLaughingMan |
 
-**Description:** Set up GCC or Clang cross-compiler targeting x86-64 freestanding. Choose assembler (NASM vs GNU as) and syntax convention (Intel vs AT&T). Pin toolchain versions for reproducible builds. This is the Phase 0 exit gate — no OS code can be written without it.
+**Description:** The primary toolchain direction is now chosen: **Clang + LLD + NASM (Intel syntax)**. Windows Phase 0 tooling is now installed and validated at the expected explicit paths, and the repo contains helper scripts plus a manifest for QEMU/OVMF launch and tool verification. Remaining work is to pin exact versions as policy, define canonical target triples and flags, document Linux setup, and prove the stack by producing a bootable sign-of-life image in QEMU/OVMF. This remains the Phase 0 exit gate — no OS code can be written safely until the chosen toolchain is actually configured and reproducible. See Bible Section 17.1 and ADR-0003.
+
+**Initial deliverables:**
+
+- exact pinned versions for Clang/LLVM, LLD, NASM, QEMU, and OVMF;
+- documented install/bootstrap steps for Windows and Linux;
+- canonical compile/link flags for freestanding kernel and boot artifacts;
+- proof build that generates a bootable image and reaches sign-of-life in QEMU/OVMF.
+
+**Current progress:**
+
+- Windows Phase 0 setup documented in `docs/PHASE0_WINDOWS_SETUP.md`.
+- Explicit-path manifest and PowerShell helpers added under `tools/phase0/windows/`.
+- Clang, LLD, NASM, QEMU, `qemu-img`, and bundled edk2 firmware verified on the current Windows workstation.
+- QEMU helper path validated with a scratch-image dry run using software emulation (`accel=tcg`).
+- Clang + `lld-link` now produce a bootable x86-64 UEFI `.efi` artifact from repo-local source.
+- QEMU/OVMF now reaches the ghOSt UEFI sign-of-life app and emits the expected debug banner.
+- Remaining blockers are now boot-artifact generation, canonical compile/link flags, Linux setup documentation, and version pinning policy.
 
 ---
 
@@ -83,14 +85,24 @@ This document tracks known issues, planned work items, and open questions for th
 
 | Field    | Value              |
 | -------- | ------------------ |
-| Status   | **Open**           |
+| Status   | **Resolved**       |
 | Priority | **P1**             |
 | Category | `boot`             |
 | Phase    | Phase 1            |
 | Created  | 2026-03-07         |
 | Assignee | AnotherLaughingMan |
 
-**Description:** Decide between GNU-EFI, POSIX-UEFI, EDK2, or writing UEFI interaction from scratch. Each has trade-offs in complexity, size, and control. See Bible Phase 1 notes.
+**Description:** Resolved by ADR-0004. ghOSt will use a minimal from-scratch UEFI
+application and loader path for early bring-up and the first sign-of-life boot milestone.
+The default path remains aligned with Clang + LLD + NASM and avoids taking on EDK2 as a
+required build framework for the first `.efi` artifact. EDK2 remains a reference and
+optional later validation path.
+
+**Resolution notes:**
+
+- Adopt a repo-owned minimal UEFI interface layer instead of GNU-EFI, POSIX-UEFI, or EDK2.
+- Build the first x86-64 `.efi` directly as PE/COFF with the primary ghOSt toolchain.
+- Continue immediately into `ISS-0041` using this decision as the implementation baseline.
 
 ---
 
@@ -158,14 +170,68 @@ This document tracks known issues, planned work items, and open questions for th
 
 | Field    | Value              |
 | -------- | ------------------ |
-| Status   | **Open**           |
+| Status   | **In Progress**    |
 | Priority | **P0**             |
 | Category | `toolchain`        |
 | Phase    | Phase 0            |
 | Created  | 2026-03-07         |
 | Assignee | AnotherLaughingMan |
 
-**Description:** Configure QEMU with OVMF (UEFI firmware) for testing bootable images without real hardware. Set up GDB remote debugging integration for kernel-level debugging. Essential for iterating on boot and kernel code.
+**Description:** Configure QEMU with OVMF (UEFI firmware) as the canonical no-hardware development and debugging environment. The Windows host-side setup is now working with QEMU's bundled edk2 x86-64 firmware, explicit-path helper scripts, scratch-image generation, staged-ESP boot, and TCG-based launch flow. The launcher now supports staged ESP directories, debugcon capture, and GDB stub flags, and QEMU/OVMF successfully boots the repo-local ghOSt UEFI sign-of-life artifact. VMware Workstation Pro 17 is acceptable as a secondary/manual validation path when it is the only VM platform available, but it does not replace QEMU/OVMF for automation, reproducibility, or preferred debug workflow. Essential for iterating on boot and kernel code.
+
+**Current progress:**
+
+- QEMU installed under `C:\Dev\Tools\qemu` and verified.
+- Bundled edk2 firmware path verified for x86-64 UEFI boot.
+- Repo-local helpers added for verification, launch, and scratch-image creation.
+- Dry-run launch path verified with `q35,accel=tcg` and serial console wiring.
+- `Start-ghOStQemu.ps1` now accepts `-EspDirectoryPath`, `-DebugConPath`, `-Gdb`, and `-GdbWait`.
+- QEMU/OVMF now successfully boots the staged ghOSt UEFI sign-of-life app from a repo-local ESP directory and captures its debug output.
+- Remaining work is packaging and validating the real bootable `.img` path in addition to the staged-ESP fast path.
+
+---
+
+### ISS-0041: Produce first UEFI sign-of-life boot artifact
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **In Progress**    |
+| Priority | **P0**             |
+| Category | `boot`             |
+| Phase    | Phase 0            |
+| Created  | 2026-03-08         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Build the first minimal ghOSt UEFI sign-of-life target and package it into a QEMU/OVMF-bootable image. This is the immediate next executable step now that the Windows Phase 0 toolchain and QEMU firmware paths are working. Scope includes the smallest viable EFI application or equivalent proof artifact, image layout, fallback boot path naming, and serial or framebuffer output that proves firmware handoff succeeded. The first repo-local UEFI source, build script, ESP staging layout, packaged-image path, and QEMU/OVMF validation path now exist; the loader now queries the UEFI memory map, discovers GOP framebuffer details, validates the first ghOSt kernel image header plus x86-64 boot-info entry ABI, reaches a C-backed early kernel initialization stub after `ExitBootServices()`, and now encodes explicit ownership/lifetime rules for the handed-off payload, final memory map, framebuffer descriptor, and early kernel stack. See Bible Sections 17.1 and 17.2.
+
+**Current progress:**
+
+- Minimal repo-owned UEFI header layer added under `boot/uefi/include/`.
+- First sign-of-life application added under `boot/uefi/src/`.
+- `tools/phase1/windows/Build-ghOStUefiSignOfLife.ps1` now emits `ghost-sign-of-life.efi` and stages `EFI/BOOT/BOOTX64.EFI`.
+- `tools/phase0/windows/Start-ghOStQemu.ps1` now supports booting directly from a staged ESP directory, capturing QEMU debugcon output, and exposing the QEMU GDB stub.
+- QEMU/OVMF validation succeeded with the expected banner: `ghOSt Phase 1 UEFI sign-of-life`.
+- The staged ESP now emits `startup.nsh` so the shell fallback still launches `EFI\BOOT\BOOTX64.EFI` reliably when OVMF lands in the internal shell first.
+- The UEFI sign-of-life app now successfully calls `GetMemoryMap()` and logs usable memory regions plus a total usable-after-exit summary in QEMU/OVMF.
+- The UEFI sign-of-life app now successfully locates GOP, logs framebuffer base/size plus resolution/pixel format, and writes a tiny test pattern when the framebuffer layout is directly usable.
+- The UEFI sign-of-life app now successfully opens `\ghOSt\kernel.bin` from the staged ESP, reads it into loader-owned memory, and validates the first ghOSt kernel image header plus explicit x86-64 boot-info entry ABI in QEMU/OVMF.
+- The Phase 1 loader now prepares a ghOSt-owned boot-info handoff struct containing payload address/size, framebuffer details, and the latest memory-map buffer plus map key, and logs that summary in QEMU/OVMF.
+- The Phase 1 loader now exits boot services, transfers control into the staged payload, and provides a dedicated kernel stack in the boot-info handoff.
+- The staged `kernel.bin` payload is now built from an assembly entry shim plus a freestanding C initialization stub, and it validates boot info while remaining headless-safe when no framebuffer is present.
+- The boot-info ABI now makes ownership explicit: the kernel owns the loaded payload buffer, final memory-map buffer, and early stack after the jump, while framebuffer metadata remains a borrowed MMIO description.
+- `tools/phase1/windows/New-ghOStUefiImage.ps1` now stages packaging through a fixed temporary VHD because Windows `diskpart` cannot attach the raw `.img` directly and rejects sparse VHDs before conversion.
+- The elevated packaged-image path has been hardened to boot deterministically under QEMU/OVMF: the headless launcher now resets stale OVMF firmware state, writes serial output to a log file instead of binding it to interactive `stdio`, and `ghost-uefi.img` reaches `exit_boot_services ok`, `kernel_entry jumping`, and `kernel_stage0 halted` under `debugcon`.
+
+**Remaining work:**
+
+- move the ownership-aware handoff buffers toward a deliberate page-aligned physical allocation policy instead of convenient loader-pool placement.
+
+**Also added:**
+
+- `tools/phase1/windows/New-ghOStUefiImage.ps1` — packages staged ESP into a real GPT/FAT32 `.img` disk image.
+- `tools/phase1/windows/Start-ghOStGdb.ps1` — attaches LLDB to the QEMU GDB stub for source-level debugging.
+- `tools/phase0/windows/Start-ghOStQemu.ps1` — now accepts `-Gdb` and `-GdbWait` switches.
+- `docs/PHASE1_BRINGUP.md` — exact build, boot, and debug workflow documented.
 
 ---
 
@@ -422,7 +488,7 @@ This document tracks known issues, planned work items, and open questions for th
 | Created  | 2026-03-07         |
 | Assignee | AnotherLaughingMan |
 
-**Description:** PCI/PCIe enumeration is the foundation for AHCI, NVMe, USB (xHCI), GPU, and NIC drivers — nothing works without it. PCIe is the native bus on all modern x86-64 hardware; legacy PCI is a VM/fallback path only. Design the enumeration subsystem: ECAM discovery via MCFG ACPI table, extended config space (4096 bytes per function), capability linked-list walking (MSI, MSI-X, PCIe cap, Power Management, AER), BAR sizing/allocation (including 64-bit BARs), bridge recursion, multi-function detection, and device-to-driver matching. Must also handle PCIe error reporting (AER), max payload/read request size negotiation, and legacy CF8h/CFCh fallback. Must be correct before any PCI-based driver is attempted. See Bible Section 5.2.
+**Description:** PCI/PCIe enumeration is the foundation for AHCI, NVMe, USB (xHCI), GPU, and NIC drivers — nothing works without it. PCIe is the native bus on all modern x86-64 hardware; legacy PCI is a VM/fallback path only. Design the enumeration subsystem: ECAM discovery via MCFG ACPI table, extended config space (4096 bytes per function), capability linked-list walking (MSI, MSI-X, PCIe cap, Power Management, AER), BAR sizing/allocation (including 64-bit BARs), bridge recursion, multi-function detection, and device-to-driver matching. Must also handle PCIe error reporting (AER), max payload/read request size negotiation, and legacy CF8h/CFCh fallback. Must be correct before any PCI-based driver is attempted. This is also the path that underpins **M.2 NVMe** and **U.2 NVMe** devices, since those are form factors built on PCIe + NVMe rather than separate OS-level protocols. See Bible Section 5.2.
 
 ---
 
@@ -437,7 +503,7 @@ This document tracks known issues, planned work items, and open questions for th
 | Created  | 2026-03-07         |
 | Assignee | AnotherLaughingMan |
 
-**Description:** AHCI is the primary SATA storage path and a notorious source of OS-dev bugs. Before writing driver code, review and plan for every pitfall cataloged in Bible Section 5.3.2: IDE mode detection, PI-based port enumeration, DMA alignment, command engine stop/start ordering, COMRESET timing, FIS construction, 64-bit DMA verification, spurious interrupts, NCQ/non-NCQ separation, error recovery via port reset, watchdog timeouts, and ATAPI detection. The driver must be tested on QEMU AHCI emulation first, then verified on real hardware. See Bible Sections 5.3.1–5.3.4.
+**Description:** AHCI is the primary SATA storage path and a notorious source of OS-dev bugs. Before writing driver code, review and plan for every pitfall cataloged in Bible Section 5.3.2: IDE mode detection, PI-based port enumeration, DMA alignment, command engine stop/start ordering, COMRESET timing, FIS construction, 64-bit DMA verification, spurious interrupts, NCQ/non-NCQ separation, error recovery via port reset, watchdog timeouts, and ATAPI detection. The driver must be tested on QEMU AHCI emulation first, then verified on real hardware. This also covers **M.2 SATA** devices, since M.2 in that configuration is a SATA/AHCI transport choice rather than a separate storage protocol. See Bible Sections 5.3.1–5.3.4.
 
 ---
 
@@ -606,7 +672,93 @@ This document tracks known issues, planned work items, and open questions for th
 
 ---
 
+### ISS-0038: Design microkernel IPC semantics and capability transfer
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P0**             |
+| Category | `kernel`           |
+| Phase    | Phase 2–3          |
+| Created  | 2026-03-08         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Define the core IPC model for the microkernel: synchronous vs asynchronous message passing, reply semantics, blocking rules, timeout behavior, handle/capability transfer, ownership rules, and security validation at the syscall boundary. This is now a critical-path design because the microkernel architecture depends on IPC for driver servers, filesystem servers, and system services. See Bible Sections 5.0 and 17.4, plus ADR-0002.
+
+**Initial deliverables:**
+
+- syscall surface for send/receive/reply and handle transfer;
+- message buffer ownership and memory-mapping rules;
+- blocking, timeout, cancellation, and deadlock-avoidance policy;
+- capability/handle validation and revocation model;
+- debugging and tracing requirements for IPC failures.
+
+---
+
+### ISS-0039: Design user-space driver server lifecycle and restart policy
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P1**             |
+| Category | `drivers`          |
+| Phase    | Phase 4–5          |
+| Created  | 2026-03-08         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Define how user-space driver servers are launched, supervised, restarted, detached, and recovered after failure. Scope includes: probe/attach sequencing, device ownership handoff, crash detection, restart eligibility, state cleanup, DMA/IRQ resource revocation, and the line between automatic recovery and manual intervention. See Bible Sections 5.0, 5.1, and 17.6, plus ADR-0002 and Appendix C, item 2.
+
+**Initial deliverables:**
+
+- driver server state machine from registration through detach;
+- supervisor responsibilities and restart policy classes;
+- resource cleanup rules for MMIO, IRQs, DMA buffers, and outstanding I/O;
+- policy for when a failed driver server may be restarted automatically;
+- observability requirements: logs, crash reports, and operator-visible device state.
+
+---
+
+### ISS-0040: Design filesystem server and VFS boundary
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Open**           |
+| Priority | **P1**             |
+| Category | `filesystem`       |
+| Phase    | Phase 4–5          |
+| Created  | 2026-03-08         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Define the boundary between the Virtual Filesystem service and concrete filesystem/storage servers in the microkernel architecture. Scope includes: namespace ownership, mount routing, path resolution across IPC boundaries, file-handle representation, caching boundaries, permission checks, and the split between VFS policy and filesystem implementation. See Bible Sections 5.0, 17.5, and ADR-0002, plus Appendix C, item 1.
+
+**Initial deliverables:**
+
+- VFS service responsibilities versus filesystem server responsibilities;
+- mount, unmount, and namespace routing model;
+- file-handle and descriptor model across IPC boundaries;
+- caching and coherency strategy between VFS, block cache, and filesystem servers;
+- failure behavior when a filesystem or storage server hangs, exits, or is restarted.
+
+---
+
 ## Resolved Issues
+
+### ISS-0002: Decide kernel architecture (monolithic vs micro vs hybrid)
+
+| Field           | Value                                                        |
+| --------------- | ------------------------------------------------------------ |
+| Status          | **Resolved**                                                 |
+| Priority        | **P0**                                                       |
+| Category        | `architecture`                                               |
+| Phase           | Phase 0                                                      |
+| Created         | 2026-03-07                                                   |
+| Resolved        | 2026-03-08                                                   |
+| Assignee        | AnotherLaughingMan                                           |
+| Resolution Link | `docs/decisions/ADR-0002-kernel-architecture-microkernel.md` |
+
+**Resolution:** ghOSt will use a **microkernel architecture**. The privileged kernel is intentionally minimal and owns low-level CPU, memory, scheduling, IPC, and security-boundary enforcement. Drivers, filesystems, and higher-level OS services run as user-space servers by default. The rationale and consequences are recorded in ADR-0002, and the Development Bible architecture sections were updated to match.
+
+---
 
 ### ISS-0001: Select open-source license
 

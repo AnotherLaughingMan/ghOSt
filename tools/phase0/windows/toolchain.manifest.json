@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "status": "draft",
+  "updated": "2026-03-08",
+  "platform": "windows-x86_64",
+  "defaultToolRoot": "C:\\Dev\\Tools",
+  "notes": [
+    "This manifest is the first executable draft for ISS-0003.",
+    "Paths are explicit on purpose so Phase 0 does not depend on global PATH changes.",
+    "Version checks are presence-oriented for now; exact pins should be tightened after the first reproducible QEMU/OVMF sign-of-life boot."
+  ],
+  "tools": {
+    "clang": {
+      "displayName": "LLVM/Clang",
+      "path": "C:\\Dev\\Tools\\llvm\\bin\\clang.exe",
+      "required": true,
+      "versionArgs": [
+        "--version"
+      ],
+      "versionRegex": "clang version"
+    },
+    "lldLink": {
+      "displayName": "LLD Linker",
+      "path": "C:\\Dev\\Tools\\llvm\\bin\\ld.lld.exe",
+      "required": true,
+      "versionArgs": [
+        "--version"
+      ],
+      "versionRegex": "LLD"
+    },
+    "nasm": {
+      "displayName": "NASM",
+      "path": "C:\\Dev\\Tools\\nasm\\nasm.exe",
+      "required": true,
+      "versionArgs": [
+        "-v"
+      ],
+      "versionRegex": "NASM"
+    },
+    "qemuSystemX64": {
+      "displayName": "QEMU System x86_64",
+      "path": "C:\\Dev\\Tools\\qemu\\qemu-system-x86_64.exe",
+      "required": true,
+      "versionArgs": [
+        "--version"
+      ],
+      "versionRegex": "QEMU emulator version"
+    },
+    "qemuImg": {
+      "displayName": "QEMU Image Tool",
+      "path": "C:\\Dev\\Tools\\qemu\\qemu-img.exe",
+      "required": true,
+      "versionArgs": [
+        "--version"
+      ],
+      "versionRegex": "qemu-img version|QEMU disk image utility"
+    },
+    "ovmfCode": {
+      "displayName": "UEFI Code Firmware (QEMU bundled edk2)",
+      "path": "C:\\Dev\\Tools\\qemu\\share\\edk2-x86_64-code.fd",
+      "required": true
+    },
+    "ovmfVarsTemplate": {
+      "displayName": "UEFI Vars Template (QEMU bundled edk2)",
+      "path": "C:\\Dev\\Tools\\qemu\\share\\edk2-i386-vars.fd",
+      "required": true
+    }
+  }
+}

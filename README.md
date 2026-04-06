@@ -13,7 +13,7 @@ ghOSt is a ground-up OS with two deployment profiles:
 
 ## Core Values
 
-- **User autonomy first.** No telemetry, no mandatory accounts, no age-gating, no content censorship at the OS level.
+- **User autonomy first.** No telemetry, no mandatory online or cloud accounts, no age-gating, no content censorship at the OS level. ghOSt uses local user and administrator accounts only.
 - **Privacy by design.** Local-first operation, user-owned encryption, minimal data collection.
 - **Small, auditable, deliberate.** Every component earns its place.
 
@@ -27,6 +27,8 @@ ghOSt is a ground-up OS with two deployment profiles:
 | Configuration   | JSON                       |
 
 UEFI boot required. Secure Boot and TPM support are optional (design does not block them).
+
+Storage support is protocol-based rather than connector-name based: **M.2 NVMe** and **U.2 NVMe** fall under PCIe + NVMe support, while **M.2 SATA** falls under SATA/AHCI support.
 
 ## Documentation
 
