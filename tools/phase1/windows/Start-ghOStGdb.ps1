@@ -3,7 +3,7 @@ param(
 
     [string]$ManifestPath = ([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\phase0\windows\toolchain.manifest.json'))),
 
-    [string]$Host = 'localhost',
+    [string]$TargetHost = 'localhost',
 
     [int]$Port = 1234
 )
@@ -19,7 +19,7 @@ if (-not (Test-Path -LiteralPath $ManifestPath)) {
     throw "Manifest not found: $ManifestPath"
 }
 
-$manifest   = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+$manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 $clangEntry = $manifest.tools.clang
 
 if ($null -eq $clangEntry) {
@@ -30,7 +30,7 @@ if (-not (Test-Path -LiteralPath $clangEntry.path)) {
     throw "Clang path not found: $($clangEntry.path)"
 }
 
-$llvmBin  = Split-Path -Parent $clangEntry.path
+$llvmBin = Split-Path -Parent $clangEntry.path
 $lldbPath = Join-Path $llvmBin 'lldb.exe'
 
 if (-not (Test-Path -LiteralPath $lldbPath)) {
@@ -59,13 +59,13 @@ if (-not (Test-Path -LiteralPath $EfiPath)) {
 $lldbArgs = @(
     '--no-use-colors',
     '--one-line-before-file', "target create `"$EfiPath`"",
-    '--one-line', "gdb-remote ${Host}:${Port}"
+    '--one-line', "gdb-remote ${TargetHost}:${Port}"
 )
 
 Write-Host 'Starting LLDB and attaching to QEMU GDB stub.'
 Write-Host "LLDB: $lldbPath"
 Write-Host "Symbol file: $EfiPath"
-Write-Host "Target: ${Host}:${Port}"
+Write-Host "Target: ${TargetHost}:${Port}"
 Write-Host ''
 Write-Host 'Make sure QEMU was launched with -Gdb (and optionally -GdbWait) first.'
 Write-Host 'You can set breakpoints with: breakpoint set --name efi_main'
