@@ -195,7 +195,7 @@ optional later validation path.
 
 | Field    | Value              |
 | -------- | ------------------ |
-| Status   | **In Progress**    |
+| Status   | **Closed**         |
 | Priority | **P0**             |
 | Category | `boot`             |
 | Phase    | Phase 0            |
@@ -219,12 +219,15 @@ optional later validation path.
 - The Phase 1 loader now exits boot services, transfers control into the staged payload, and provides a dedicated kernel stack in the boot-info handoff.
 - The staged `kernel.bin` payload is now built from an assembly entry shim plus a freestanding C initialization stub, and it validates boot info while remaining headless-safe when no framebuffer is present.
 - The boot-info ABI now makes ownership explicit: the kernel owns the loaded payload buffer, final memory-map buffer, and early stack after the jump, while framebuffer metadata remains a borrowed MMIO description.
+- The Phase 1 loader now allocates the kernel payload, final memory-map buffer, and early stack from page-backed `AllocatePages()` memory, and stage0 now rejects handoffs that are not explicitly marked page-aligned.
 - `tools/phase1/windows/New-ghOStUefiImage.ps1` now stages packaging through a fixed temporary VHD because Windows `diskpart` cannot attach the raw `.img` directly and rejects sparse VHDs before conversion.
-- The elevated packaged-image path has been hardened to boot deterministically under QEMU/OVMF: the headless launcher now resets stale OVMF firmware state, writes serial output to a log file instead of binding it to interactive `stdio`, and `ghost-uefi.img` reaches `exit_boot_services ok`, `kernel_entry jumping`, and `kernel_stage0 halted` under `debugcon`.
+- The image packager now normalizes `ImagePath` to a full path, detaches the staging virtual disk cleanly before conversion, and converts the diskpart-created staging image using the correct raw input format instead of a stale `vpc` assumption.
+- The staged ESP validation path reaches `exit_boot_services ok`, `kernel_entry jumping`, and `kernel_stage0 halted` with the new page-backed handoff contract in place.
+- Fresh raw packaged-image validation now also reaches `exit_boot_services ok`, `kernel_entry jumping`, and `kernel_stage0 halted` under QEMU/OVMF with the same page-backed boot-info flags.
 
 **Remaining work:**
 
-- move the ownership-aware handoff buffers toward a deliberate page-aligned physical allocation policy instead of convenient loader-pool placement.
+- None inside this issue; the next work item moves on to post-sign-of-life kernel memory-management bring-up.
 
 **Also added:**
 
@@ -232,6 +235,48 @@ optional later validation path.
 - `tools/phase1/windows/Start-ghOStGdb.ps1` — attaches LLDB to the QEMU GDB stub for source-level debugging.
 - `tools/phase0/windows/Start-ghOStQemu.ps1` — now accepts `-Gdb` and `-GdbWait` switches.
 - `docs/PHASE1_BRINGUP.md` — exact build, boot, and debug workflow documented.
+
+---
+
+### ISS-0042: Early physical memory manager bring-up
+
+| Field    | Value              |
+| -------- | ------------------ |
+| Status   | **Closed**         |
+| Priority | **P1**             |
+| Category | `kernel`           |
+| Phase    | Phase 1            |
+| Created  | 2026-04-06         |
+| Assignee | AnotherLaughingMan |
+
+**Description:** Implement an early physical memory manager (PMM) that consumes
+the final UEFI memory map from the page-backed boot-info contract after
+`ExitBootServices()`. The PMM must classify reclaimable regions, build a
+bitmap allocator covering the physical address space of all RAM regions in the
+map, and expose `ghost_pmm_alloc_page()` / `ghost_pmm_free_page()` to the early
+kernel. stage0 must call PMM init and emit a `kernel_stage0 pmm_ok` log line
+before halting, proving the allocator came up clean.
+
+**Deliverables:**
+
+- `boot/uefi/include/ghost_pmm.h` — PMM interface header (init, alloc, free, stats).
+- `boot/kernel/mm/ghost_pmm.c` — Bitmap allocator seeded from the UEFI memory map.
+- `boot/kernel/stage0/kernel_stage0.c` — PMM init call plus decimal/hex output helpers for stats logging.
+- `tools/phase1/windows/Build-ghOStUefiSignOfLife.ps1` — compile and link `ghost_pmm.c` into the kernel payload.
+- `boot/uefi/src/ghost_loader.c` — BSS zero-fill added to handle flat-binary payloads where `image_size > file_size`.
+
+**Current progress:**
+
+- `ghost_pmm_init()` walks the final UEFI memory map in three passes: find highest RAM address (excluding MMIO/reserved apertures), find a free EfiConventionalMemory region for the bitmap, then mark reclaimable regions (Conventional, BootServicesCode, BootServicesData) as free.
+- Bitmap is placed at the first EfiConventionalMemory region large enough to hold it; those pages are then marked used in the bitmap.
+- Pass 1 whitelists only known-RAM memory types to prevent high-address firmware windows from inflating the bitmap size — on a 512 MiB QEMU machine the bitmap is 16 KiB (4 pages) rather than 32 MiB.
+- `ghost_pmm_alloc_page()` and `ghost_pmm_free_page()` are fully functional.
+- The loader's BSS zero-fill ensures that kernel-payload `.bss` data is cleared before stage0 runs; the validation check was updated to compare `image_size` against allocated pages (not file bytes) so that flat binaries with a BSS section pass the header check.
+- Staged ESP boot: `kernel_stage0 pmm_ok pages_total=131072 pages_usable=129206 pages_free=129202 bitmap_base=0x0`.
+- Packaged raw-image boot: `kernel_stage0 pmm_ok pages_total=131072 pages_usable=129440 pages_free=129436 bitmap_base=0x0`.
+- Both boot paths continue to `kernel_stage0 framebuffer_ok` and `kernel_stage0 halted` with no regressions.
+
+**Remaining work:** None inside this issue; next work item is GDT setup, IDT bring-up, and the virtual memory manager (Phase 2).
 
 ---
 

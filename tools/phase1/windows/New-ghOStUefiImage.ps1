@@ -77,6 +77,10 @@ if (-not (Test-Path -LiteralPath $EspPath)) {
     throw "ESP staging directory not found: $EspPath"
 }
 
+$ManifestPath = [System.IO.Path]::GetFullPath($ManifestPath)
+$EspPath = [System.IO.Path]::GetFullPath($EspPath)
+$ImagePath = [System.IO.Path]::GetFullPath($ImagePath)
+
 $bootx64Path = Join-Path $EspPath 'EFI\BOOT\BOOTX64.EFI'
 $kernelPayloadPath = Join-Path $EspPath 'ghOSt\kernel.bin'
 
@@ -212,18 +216,29 @@ else {
     finally {
         if ($isAttached) {
             $detachCommands = @(
-                "select vdisk file=`"$resolvedImagePath`"",
+                'select volume Z',
                 'remove letter=Z',
+                "select vdisk file=`"$resolvedImagePath`"",
                 'detach vdisk',
                 'exit'
             )
 
-            Invoke-DiskPart -Commands $detachCommands | Out-Null
+            $detachResult = Invoke-DiskPart -Commands $detachCommands
+            $detachTranscript = ($detachResult | Out-String)
+
+            if ($detachTranscript -match 'error') {
+                throw "Failed to detach staging VHD cleanly. DiskPart output:`n$detachTranscript"
+            }
         }
     }
 
-    Write-Host 'Step 3: Converting staged VHD to final raw image ...'
-    & $qemuImgPath convert -f vpc -O raw $stagingVhdPath $ImagePath | Out-Null
+    Write-Host 'Step 3: Converting staged image to final raw image ...'
+    & $qemuImgPath convert -f raw -O raw $stagingVhdPath $ImagePath | Out-Null
+
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $ImagePath)) {
+        throw "qemu-img failed to produce the final raw image at $ImagePath (exit code $LASTEXITCODE)."
+    }
+
     Remove-Item -LiteralPath $stagingVhdPath -Force -ErrorAction SilentlyContinue
 }
 

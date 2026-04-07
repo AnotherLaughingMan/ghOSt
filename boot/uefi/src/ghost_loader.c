@@ -4,8 +4,8 @@
 
 #define GHOST_KERNEL_STACK_ALIGNMENT 16ULL
 #define GHOST_KERNEL_STACK_SIZE_BYTES (64ULL * 1024ULL)
-#define GHOST_MEMORY_MAP_BUFFER_CAPACITY 32768
 #define GHOST_PAGE_SIZE 4096ULL
+#define GHOST_MEMORY_MAP_DESCRIPTOR_SLACK 8ULL
 
 static EFI_GUID g_loaded_image_protocol_guid = {
     0x5B1B31A1,
@@ -36,9 +36,93 @@ static EFI_GUID g_simple_file_system_protocol_guid = {
 };
 
 static GhostBootInfo_t s_boot_info;
-static UINT8 s_memory_map_buffer[GHOST_MEMORY_MAP_BUFFER_CAPACITY];
+static VOID *s_memory_map_buffer;
+static UINTN s_memory_map_buffer_size;
 
 typedef VOID(EFIAPI *GhostKernelEntryPoint)(const GhostBootInfo_t *boot_info);
+
+static UINTN align_up(UINTN value, UINTN alignment)
+{
+    return (value + alignment - 1U) & ~(alignment - 1U);
+}
+
+static UINTN size_bytes_to_page_count(UINTN size_bytes)
+{
+    return align_up(size_bytes, (UINTN)GHOST_PAGE_SIZE) / (UINTN)GHOST_PAGE_SIZE;
+}
+
+static EFI_STATUS allocate_loader_pages(
+    EFI_SYSTEM_TABLE *system_table,
+    UINTN size_bytes,
+    EFI_PHYSICAL_ADDRESS *physical_address_out)
+{
+    EFI_PHYSICAL_ADDRESS physical_address;
+    UINTN page_count;
+    EFI_STATUS status;
+
+    if (system_table == (VOID *)0 ||
+        system_table->boot_services == (VOID *)0 ||
+        system_table->boot_services->allocate_pages == (VOID *)0 ||
+        physical_address_out == (VOID *)0 ||
+        size_bytes == 0) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    page_count = size_bytes_to_page_count(size_bytes);
+    physical_address = 0;
+    status = system_table->boot_services->allocate_pages(
+        AllocateAnyPages,
+        EfiLoaderData,
+        page_count,
+        &physical_address);
+
+    if (status != EFI_SUCCESS) {
+        return status;
+    }
+
+    *physical_address_out = physical_address;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS ensure_memory_map_buffer_capacity(
+    EFI_SYSTEM_TABLE *system_table,
+    UINTN minimum_size_bytes,
+    UINTN descriptor_size_hint)
+{
+    EFI_PHYSICAL_ADDRESS physical_address;
+    UINTN requested_size_bytes;
+    EFI_STATUS status;
+
+    if (minimum_size_bytes == 0) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    if (descriptor_size_hint == 0) {
+        descriptor_size_hint = sizeof(EFI_MEMORY_DESCRIPTOR);
+    }
+
+    requested_size_bytes = minimum_size_bytes +
+        (descriptor_size_hint * (UINTN)GHOST_MEMORY_MAP_DESCRIPTOR_SLACK) +
+        (UINTN)GHOST_PAGE_SIZE;
+
+    if (requested_size_bytes < minimum_size_bytes) {
+        return EFI_LOAD_ERROR;
+    }
+
+    if (s_memory_map_buffer != (VOID *)0 && s_memory_map_buffer_size >= requested_size_bytes) {
+        return EFI_SUCCESS;
+    }
+
+    status = allocate_loader_pages(system_table, requested_size_bytes, &physical_address);
+
+    if (status != EFI_SUCCESS) {
+        return status;
+    }
+
+    s_memory_map_buffer = (VOID *)(UINTN)physical_address;
+    s_memory_map_buffer_size = size_bytes_to_page_count(requested_size_bytes) * (UINTN)GHOST_PAGE_SIZE;
+    return EFI_SUCCESS;
+}
 
 static UINT8 memory_type_is_usable_after_exit(UINT32 memory_type)
 {
@@ -124,6 +208,8 @@ static VOID initialize_boot_info(VOID)
 
     s_boot_info.revision = GHOST_BOOT_INFO_REVISION;
     s_boot_info.size = (UINT32)sizeof(s_boot_info);
+    s_memory_map_buffer = (VOID *)0;
+    s_memory_map_buffer_size = 0;
 }
 
 static VOID log_kernel_payload_status(EFI_SYSTEM_TABLE *system_table, const GhostBootInfo_t *boot_info)
@@ -188,7 +274,7 @@ static EFI_STATUS resolve_kernel_payload_entry(EFI_SYSTEM_TABLE *system_table, G
         header->header_size < sizeof(GhostKernelImageHeader_t) ||
         header->header_size > boot_info->kernel_payload.size_bytes ||
         header->image_size == 0 ||
-        header->image_size > boot_info->kernel_payload.size_bytes ||
+        header->image_size > (UINT64)size_bytes_to_page_count((UINTN)boot_info->kernel_payload.size_bytes) * GHOST_PAGE_SIZE ||
         header->entry_offset < header->header_size ||
         header->entry_offset >= header->image_size) {
         line_buffer[0] = '\0';
@@ -215,11 +301,33 @@ static EFI_STATUS resolve_kernel_payload_entry(EFI_SYSTEM_TABLE *system_table, G
 
     entry_point = boot_info->kernel_payload.physical_address + header->entry_offset;
     boot_info->kernel_payload.entry_point = entry_point;
+
+    /*
+     * Zero-fill the BSS region if image_size extends beyond the file content.
+     * The loader allocates page-aligned memory, so the extra bytes already
+     * exist in the buffer — they just need to be cleared before the kernel runs.
+     */
+    if (header->image_size > boot_info->kernel_payload.size_bytes) {
+        UINT8  *bss_start;
+        UINT64  bss_len;
+        UINT64  i;
+
+        bss_start = (UINT8 *)(UINTN)boot_info->kernel_payload.physical_address +
+                    boot_info->kernel_payload.size_bytes;
+        bss_len   = header->image_size - boot_info->kernel_payload.size_bytes;
+
+        for (i = 0; i < bss_len; ++i) {
+            bss_start[i] = 0;
+        }
+
+        boot_info->kernel_payload.size_bytes = header->image_size;
+    }
     boot_info->kernel_payload.flags |=
         GHOST_KERNEL_PAYLOAD_FLAG_HEADER_VALID |
         GHOST_KERNEL_PAYLOAD_FLAG_ENTRY_VALID |
         GHOST_KERNEL_PAYLOAD_FLAG_ABI_VALID |
-        GHOST_KERNEL_PAYLOAD_FLAG_KERNEL_OWNED;
+        GHOST_KERNEL_PAYLOAD_FLAG_KERNEL_OWNED |
+        GHOST_KERNEL_PAYLOAD_FLAG_PAGE_ALIGNED;
     return EFI_SUCCESS;
 }
 
@@ -230,6 +338,7 @@ static EFI_STATUS load_kernel_payload(
 {
     char line_buffer[192];
     const CHAR16 *kernel_payload_path = (const CHAR16 *)L"\\ghOSt\\kernel.bin";
+    EFI_PHYSICAL_ADDRESS payload_buffer_address;
     EFI_FILE_INFO *file_info;
     EFI_FILE_PROTOCOL *file;
     EFI_FILE_PROTOCOL *root;
@@ -246,11 +355,13 @@ static EFI_STATUS load_kernel_payload(
     root = (VOID *)0;
     loaded_image = (VOID *)0;
     simple_fs = (VOID *)0;
+    payload_buffer_address = 0;
     payload_buffer = (VOID *)0;
 
     if (system_table == (VOID *)0 ||
         system_table->boot_services == (VOID *)0 ||
         system_table->boot_services->handle_protocol == (VOID *)0 ||
+        system_table->boot_services->allocate_pages == (VOID *)0 ||
         system_table->boot_services->allocate_pool == (VOID *)0 ||
         system_table->boot_services->free_pool == (VOID *)0) {
         return EFI_LOAD_ERROR;
@@ -344,10 +455,11 @@ static EFI_STATUS load_kernel_payload(
         goto cleanup;
     }
 
-    status = system_table->boot_services->allocate_pool(
-        EfiLoaderData,
-        (UINTN)file_info->file_size,
-        (VOID **)&payload_buffer);
+    status = allocate_loader_pages(system_table, (UINTN)file_info->file_size, &payload_buffer_address);
+
+    if (status == EFI_SUCCESS) {
+        payload_buffer = (UINT8 *)(UINTN)payload_buffer_address;
+    }
 
     if (status != EFI_SUCCESS || payload_buffer == (VOID *)0) {
         line_buffer[0] = '\0';
@@ -376,7 +488,7 @@ static EFI_STATUS load_kernel_payload(
         goto cleanup;
     }
 
-    boot_info->kernel_payload.physical_address = (UINT64)(UINTN)payload_buffer;
+    boot_info->kernel_payload.physical_address = (UINT64)payload_buffer_address;
     boot_info->kernel_payload.size_bytes = file_info->file_size;
     boot_info->flags |= GHOST_BOOT_INFO_FLAG_KERNEL_PAYLOAD_VALID;
 
@@ -494,11 +606,43 @@ static EFI_STATUS capture_memory_map(EFI_SYSTEM_TABLE *system_table, GhostBootIn
     }
 
     get_memory_map = system_table->boot_services->get_memory_map;
-    map_size = sizeof(s_memory_map_buffer);
+    map_size = 0;
     map_key = 0;
     descriptor_size = 0;
     descriptor_version = 0;
 
+    status = get_memory_map(
+        &map_size,
+        (EFI_MEMORY_DESCRIPTOR *)0,
+        &map_key,
+        &descriptor_size,
+        &descriptor_version);
+
+    if (status != EFI_BUFFER_TOO_SMALL || map_size == 0) {
+        line_buffer[0] = '\0';
+        line_length = ghost_append_ascii(line_buffer, 0, sizeof(line_buffer), "memory_map probe_failed status=");
+        line_length = ghost_append_u64_hex(line_buffer, line_length, sizeof(line_buffer), (UINT64)status);
+        line_length = ghost_append_ascii(line_buffer, line_length, sizeof(line_buffer), " required=");
+        line_length = ghost_append_u64_decimal(line_buffer, line_length, sizeof(line_buffer), (UINT64)map_size);
+        line_length = ghost_append_ascii(line_buffer, line_length, sizeof(line_buffer), " bytes\r\n");
+        ghost_output_log_line(system_table, line_buffer);
+        return (status == EFI_SUCCESS) ? EFI_LOAD_ERROR : status;
+    }
+
+    status = ensure_memory_map_buffer_capacity(system_table, map_size, descriptor_size);
+
+    if (status != EFI_SUCCESS) {
+        line_buffer[0] = '\0';
+        line_length = ghost_append_ascii(line_buffer, 0, sizeof(line_buffer), "memory_map buffer_alloc_failed status=");
+        line_length = ghost_append_u64_hex(line_buffer, line_length, sizeof(line_buffer), (UINT64)status);
+        line_length = ghost_append_ascii(line_buffer, line_length, sizeof(line_buffer), " size=");
+        line_length = ghost_append_u64_decimal(line_buffer, line_length, sizeof(line_buffer), (UINT64)map_size);
+        line_length = ghost_append_ascii(line_buffer, line_length, sizeof(line_buffer), " bytes\r\n");
+        ghost_output_log_line(system_table, line_buffer);
+        return status;
+    }
+
+    map_size = s_memory_map_buffer_size;
     status = get_memory_map(
         &map_size,
         (EFI_MEMORY_DESCRIPTOR *)s_memory_map_buffer,
@@ -507,12 +651,19 @@ static EFI_STATUS capture_memory_map(EFI_SYSTEM_TABLE *system_table, GhostBootIn
         &descriptor_version);
 
     if (status == EFI_BUFFER_TOO_SMALL) {
-        line_buffer[0] = '\0';
-        line_length = ghost_append_ascii(line_buffer, 0, sizeof(line_buffer), "memory_map buffer_too_small required=");
-        line_length = ghost_append_u64_decimal(line_buffer, line_length, sizeof(line_buffer), (UINT64)map_size);
-        line_length = ghost_append_ascii(line_buffer, line_length, sizeof(line_buffer), " bytes\r\n");
-        ghost_output_log_line(system_table, line_buffer);
-        return status;
+        status = ensure_memory_map_buffer_capacity(system_table, map_size, descriptor_size);
+
+        if (status != EFI_SUCCESS) {
+            return status;
+        }
+
+        map_size = s_memory_map_buffer_size;
+        status = get_memory_map(
+            &map_size,
+            (EFI_MEMORY_DESCRIPTOR *)s_memory_map_buffer,
+            &map_key,
+            &descriptor_size,
+            &descriptor_version);
     }
 
     if (status != EFI_SUCCESS || descriptor_size == 0) {
@@ -533,7 +684,7 @@ static EFI_STATUS capture_memory_map(EFI_SYSTEM_TABLE *system_table, GhostBootIn
     boot_info->memory_map.descriptor_size = (UINT32)descriptor_size;
     boot_info->memory_map.descriptor_version = descriptor_version;
     boot_info->memory_map.descriptor_count = (UINT32)descriptor_count;
-    boot_info->memory_map.flags = GHOST_MEMORY_MAP_FLAG_KERNEL_OWNED;
+    boot_info->memory_map.flags = GHOST_MEMORY_MAP_FLAG_KERNEL_OWNED | GHOST_MEMORY_MAP_FLAG_PAGE_ALIGNED;
     boot_info->flags |= GHOST_BOOT_INFO_FLAG_MEMORY_MAP_VALID;
 
     line_buffer[0] = '\0';
@@ -549,7 +700,7 @@ static EFI_STATUS capture_memory_map(EFI_SYSTEM_TABLE *system_table, GhostBootIn
     for (offset = 0; offset + descriptor_size <= map_size; offset += descriptor_size) {
         UINT64 region_bytes;
 
-        descriptor = (EFI_MEMORY_DESCRIPTOR *)(s_memory_map_buffer + offset);
+        descriptor = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)s_memory_map_buffer + offset);
 
         if (!memory_type_is_usable_after_exit(descriptor->type)) {
             continue;
@@ -582,6 +733,7 @@ static EFI_STATUS capture_memory_map(EFI_SYSTEM_TABLE *system_table, GhostBootIn
 static EFI_STATUS prepare_kernel_stack(EFI_SYSTEM_TABLE *system_table, GhostBootInfo_t *boot_info)
 {
     char line_buffer[192];
+    EFI_PHYSICAL_ADDRESS stack_buffer_address;
     UINT64 raw_top_address;
     VOID *stack_buffer;
     EFI_STATUS status;
@@ -589,15 +741,17 @@ static EFI_STATUS prepare_kernel_stack(EFI_SYSTEM_TABLE *system_table, GhostBoot
 
     if (system_table == (VOID *)0 ||
         system_table->boot_services == (VOID *)0 ||
-        system_table->boot_services->allocate_pool == (VOID *)0) {
+        system_table->boot_services->allocate_pages == (VOID *)0) {
         return EFI_LOAD_ERROR;
     }
 
+    stack_buffer_address = 0;
     stack_buffer = (VOID *)0;
-    status = system_table->boot_services->allocate_pool(
-        EfiLoaderData,
-        (UINTN)GHOST_KERNEL_STACK_SIZE_BYTES,
-        &stack_buffer);
+    status = allocate_loader_pages(system_table, (UINTN)GHOST_KERNEL_STACK_SIZE_BYTES, &stack_buffer_address);
+
+    if (status == EFI_SUCCESS) {
+        stack_buffer = (VOID *)(UINTN)stack_buffer_address;
+    }
 
     if (status != EFI_SUCCESS || stack_buffer == (VOID *)0) {
         line_buffer[0] = '\0';
@@ -612,13 +766,14 @@ static EFI_STATUS prepare_kernel_stack(EFI_SYSTEM_TABLE *system_table, GhostBoot
 
     raw_top_address = (UINT64)(UINTN)stack_buffer + GHOST_KERNEL_STACK_SIZE_BYTES;
 
-    boot_info->kernel_stack.physical_address = (UINT64)(UINTN)stack_buffer;
+    boot_info->kernel_stack.physical_address = (UINT64)stack_buffer_address;
     boot_info->kernel_stack.size_bytes = GHOST_KERNEL_STACK_SIZE_BYTES;
     boot_info->kernel_stack.top_address = raw_top_address & ~(GHOST_KERNEL_STACK_ALIGNMENT - 1ULL);
     boot_info->kernel_stack.flags =
         GHOST_KERNEL_STACK_FLAG_KERNEL_OWNED |
         GHOST_KERNEL_STACK_FLAG_GROWS_DOWN |
-        GHOST_KERNEL_STACK_FLAG_16_BYTE_ALIGNED;
+        GHOST_KERNEL_STACK_FLAG_16_BYTE_ALIGNED |
+        GHOST_KERNEL_STACK_FLAG_PAGE_ALIGNED;
     boot_info->flags |= GHOST_BOOT_INFO_FLAG_KERNEL_STACK_VALID;
 
     line_buffer[0] = '\0';
@@ -647,17 +802,33 @@ static EFI_STATUS refresh_memory_map_for_exit(EFI_SYSTEM_TABLE *system_table, Gh
         return EFI_LOAD_ERROR;
     }
 
-    map_size = sizeof(s_memory_map_buffer);
-    map_key = 0;
-    descriptor_size = 0;
-    descriptor_version = 0;
+    if (s_memory_map_buffer == (VOID *)0 || s_memory_map_buffer_size == 0) {
+        return EFI_LOAD_ERROR;
+    }
 
-    status = system_table->boot_services->get_memory_map(
-        &map_size,
-        (EFI_MEMORY_DESCRIPTOR *)s_memory_map_buffer,
-        &map_key,
-        &descriptor_size,
-        &descriptor_version);
+    for (;;) {
+        map_size = s_memory_map_buffer_size;
+        map_key = 0;
+        descriptor_size = 0;
+        descriptor_version = 0;
+
+        status = system_table->boot_services->get_memory_map(
+            &map_size,
+            (EFI_MEMORY_DESCRIPTOR *)s_memory_map_buffer,
+            &map_key,
+            &descriptor_size,
+            &descriptor_version);
+
+        if (status != EFI_BUFFER_TOO_SMALL) {
+            break;
+        }
+
+        status = ensure_memory_map_buffer_capacity(system_table, map_size, descriptor_size);
+
+        if (status != EFI_SUCCESS) {
+            return status;
+        }
+    }
 
     if (status != EFI_SUCCESS) {
         return status;
@@ -669,7 +840,10 @@ static EFI_STATUS refresh_memory_map_for_exit(EFI_SYSTEM_TABLE *system_table, Gh
     boot_info->memory_map.descriptor_size = (UINT32)descriptor_size;
     boot_info->memory_map.descriptor_version = descriptor_version;
     boot_info->memory_map.descriptor_count = (UINT32)(map_size / descriptor_size);
-    boot_info->memory_map.flags = GHOST_MEMORY_MAP_FLAG_KERNEL_OWNED | GHOST_MEMORY_MAP_FLAG_FINAL_FOR_EXIT;
+    boot_info->memory_map.flags =
+        GHOST_MEMORY_MAP_FLAG_KERNEL_OWNED |
+        GHOST_MEMORY_MAP_FLAG_FINAL_FOR_EXIT |
+        GHOST_MEMORY_MAP_FLAG_PAGE_ALIGNED;
     boot_info->flags |= GHOST_BOOT_INFO_FLAG_MEMORY_MAP_VALID;
 
     return EFI_SUCCESS;

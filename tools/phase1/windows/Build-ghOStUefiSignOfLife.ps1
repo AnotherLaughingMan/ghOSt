@@ -55,10 +55,15 @@ if (-not (Test-Path -LiteralPath $llvmObjcopyPath)) {
 }
 
 $includeDirectory = Join-Path $repositoryRoot 'boot\uefi\include'
+$kernelIncludeDirectory = Join-Path $repositoryRoot 'boot\kernel\include'
 $kernelStage0Directory = Join-Path $repositoryRoot 'boot\kernel\stage0'
 $kernelStage0AssemblyPath = Join-Path $kernelStage0Directory 'kernel_stage0.asm'
 $kernelStage0CPath = Join-Path $kernelStage0Directory 'kernel_stage0.c'
 $kernelStage0LinkerScriptPath = Join-Path $kernelStage0Directory 'kernel_stage0.ld'
+$ghostPmmDirectory = Join-Path $repositoryRoot 'boot\kernel\mm'
+$ghostPmmCPath = Join-Path $ghostPmmDirectory 'ghost_pmm.c'
+$kernelVersionHeaderPath = Join-Path $kernelIncludeDirectory 'ghost_version.h'
+$versionConsistencyScriptPath = Join-Path $repositoryRoot 'tools\phase1\windows\Test-ghOStVersionConsistency.ps1'
 $sourceDirectory = Join-Path $repositoryRoot 'boot\uefi\src'
 
 if (-not (Test-Path -LiteralPath $sourceDirectory)) {
@@ -75,6 +80,18 @@ if (-not (Test-Path -LiteralPath $kernelStage0CPath)) {
 
 if (-not (Test-Path -LiteralPath $kernelStage0LinkerScriptPath)) {
     throw "Kernel stage0 linker script not found: $kernelStage0LinkerScriptPath"
+}
+
+if (-not (Test-Path -LiteralPath $ghostPmmCPath)) {
+    throw "Ghost PMM C source not found: $ghostPmmCPath"
+}
+
+if (-not (Test-Path -LiteralPath $kernelVersionHeaderPath)) {
+    throw "Kernel version header not found: $kernelVersionHeaderPath"
+}
+
+if (-not (Test-Path -LiteralPath $versionConsistencyScriptPath)) {
+    throw "Version consistency script not found: $versionConsistencyScriptPath"
 }
 
 $sourcePaths = @(Get-ChildItem -LiteralPath $sourceDirectory -Filter '*.c' | Sort-Object Name | Select-Object -ExpandProperty FullName)
@@ -102,6 +119,7 @@ $kernelPayloadBinaryPath = Join-Path $binaryDirectory 'kernel.bin'
 $legacyKernelPayloadBinaryPath = Join-Path $binaryDirectory 'kernel-stage0.bin'
 $kernelStage0AssemblyObjectPath = Join-Path $objectDirectory 'kernel_stage0_asm.o'
 $kernelStage0CObjectPath = Join-Path $objectDirectory 'kernel_stage0_c.o'
+$ghostPmmCObjectPath = Join-Path $objectDirectory 'ghost_pmm_c.o'
 $espBootPath = Join-Path $efiBootDirectory 'BOOTX64.EFI'
 $kernelPayloadEspPath = Join-Path $kernelPayloadEspDirectory 'kernel.bin'
 $legacyKernelPayloadEspPath = Join-Path $kernelPayloadEspDirectory 'kernel-stage0.bin'
@@ -115,6 +133,8 @@ Write-Host "Assembler: $nasmPath"
 Write-Host "Stage0 linker: $ldLldPath"
 Write-Host "Linker: $lldLinkPath"
 Write-Host "Sources: $($sourcePaths.Count)"
+
+& $versionConsistencyScriptPath -RepositoryRoot $repositoryRoot
 
 Remove-Item -LiteralPath $legacyKernelPayloadBinaryPath -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $legacyKernelPayloadEspPath -Force -ErrorAction SilentlyContinue
@@ -141,11 +161,33 @@ $stage0CompileArgs = @(
     '-O2',
     '-g',
     '-I', $includeDirectory,
+    '-I', $kernelIncludeDirectory,
     '-c', $kernelStage0CPath,
     '-o', $kernelStage0CObjectPath
 )
 
 & $clangPath @stage0CompileArgs
+
+$ghostPmmCompileArgs = @(
+    '--target=x86_64-unknown-none-elf',
+    '-ffreestanding',
+    '-fno-builtin',
+    '-fno-pic',
+    '-fno-stack-protector',
+    '-mno-red-zone',
+    '-std=c11',
+    '-Wall',
+    '-Wextra',
+    '-Werror',
+    '-O2',
+    '-g',
+    '-I', $includeDirectory,
+    '-I', $kernelIncludeDirectory,
+    '-c', $ghostPmmCPath,
+    '-o', $ghostPmmCObjectPath
+)
+
+& $clangPath @ghostPmmCompileArgs
 
 $stage0LinkArgs = @(
     '-T', $kernelStage0LinkerScriptPath,
@@ -154,7 +196,8 @@ $stage0LinkArgs = @(
     '--gc-sections',
     '-o', $kernelPayloadElfPath,
     $kernelStage0AssemblyObjectPath,
-    $kernelStage0CObjectPath
+    $kernelStage0CObjectPath,
+    $ghostPmmCObjectPath
 )
 
 & $ldLldPath @stage0LinkArgs

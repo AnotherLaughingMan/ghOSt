@@ -96,7 +96,7 @@ BdsDxe: loading Boot0001 "UEFI QEMU QEMU USB HARDDRIVE ..."
 BdsDxe: starting Boot0001 "UEFI QEMU QEMU USB HARDDRIVE ..."
 ghOSt Phase 1 UEFI sign-of-life
 toolchain=clang+lld-link target=x86_64-pc-win32-coff
-kernel_payload loaded size=980 bytes
+kernel_payload loaded size=996 bytes
 kernel_payload entry_point=0x...
 kernel_payload header_ok
 kernel_payload abi_ok
@@ -107,11 +107,11 @@ memory_map descriptors=... descriptor_size=48 version=1
 usable type=Conventional start=0x... pages=... bytes=0x...
 usable_after_exit_total=0x... bytes
 boot_info revision=1 size=160 flags=0xF
-boot_info kernel_base=0x... kernel_size=0x... kernel_flags=0xF
+boot_info kernel_base=0x... kernel_size=0x... kernel_flags=0x1F
 boot_info framebuffer_base=0x... framebuffer_size=0x... framebuffer_flags=0x3
-boot_info memory_map_base=0x... memory_map_size=0x... map_key=0x... memory_map_flags=0x1
-boot_info kernel_stack_base=0x... kernel_stack_size=0x10000 kernel_stack_top=0x... kernel_stack_flags=0x7
-exit_boot_services map_ready key=0x... flags=0x3
+boot_info memory_map_base=0x... memory_map_size=0x... map_key=0x... memory_map_flags=0x5
+boot_info kernel_stack_base=0x... kernel_stack_size=0x10000 kernel_stack_top=0x... kernel_stack_flags=0xF
+exit_boot_services map_ready key=0x... flags=0x7
 exit_boot_services ok
 kernel_entry jumping
 kernel_stage0 entered
@@ -289,9 +289,16 @@ exit_boot_services ok
 kernel_entry jumping
 kernel_stage0 entered
 kernel_stage0 boot_info_ok
+kernel_stage0 pmm_init
+kernel_stage0 pmm_ok pages_total=131072 pages_usable=<N> pages_free=<N> bitmap_base=0x<addr>
 kernel_stage0 framebuffer_ok
 kernel_stage0 halted
 ```
+
+`pages_total` equals the highest physical RAM address divided by 4096. On the
+512 MiB QEMU machine this is 131072. `pages_free` is slightly less than
+`pages_usable` because the bitmap itself occupies a few pages of
+EfiConventionalMemory at `bitmap_base`.
 
 If the log file exists but is empty, OVMF did not reach `efi_main`. Check:
 
@@ -307,6 +314,8 @@ If the log file exists but is empty, OVMF did not reach `efi_main`. Check:
 ```
 boot/
   kernel/
+    mm/
+      ghost_pmm.c             Early physical memory manager (bitmap allocator)
     stage0/
       kernel_stage0.asm       Assembly entry shim plus ghOSt kernel image header
       kernel_stage0.c         Freestanding C early kernel initialization stub
@@ -316,6 +325,7 @@ boot/
       ghost_boot_info.h       ghOSt-owned firmware-to-kernel handoff structs
       ghost_kernel_image.h    ghOSt kernel image header and entry ABI constants
       ghost_log.h             Shared debugcon, console, and formatting helpers
+      ghost_pmm.h             Early PMM interface (init, alloc, free, stats)
       ghost_loader.h          Loader entry shared by the tiny UEFI application
       ghost_uefi.h            Minimal UEFI type and protocol definitions
     src/
@@ -361,12 +371,27 @@ out/                          (git-ignored)
 
 The sign-of-life proof now includes the first real post-`ExitBootServices()`
 kernel transfer, a freestanding C early kernel initialization stub, the first
-ghOSt-owned kernel image header, and an explicit ownership-aware firmware-to-
-kernel handoff contract.
-The next follow-on work is now narrower and more mechanical:
+ghOSt-owned kernel image header, an explicit ownership-aware firmware-to-
+kernel handoff contract, page-backed payload/map/stack placement, and fresh raw
+packaged-image validation under QEMU/OVMF.
+The sign-of-life proof now also includes an early physical memory manager that
+consumes the final UEFI memory map, classifies reclaimable regions
+(EfiConventionalMemory, EfiBootServicesCode, EfiBootServicesData), builds a
+bitmap allocator over the physical address space of the RAM regions seen in the
+map, and exposes `ghost_pmm_alloc_page()` / `ghost_pmm_free_page()` to the
+early kernel. On a 512 MiB QEMU machine the PMM reports approximately
+`pages_total=131072`, `pages_usable≈129000`, `pages_free≈129000` (minus the few
+bytes for the bitmap itself) via the `kernel_stage0 pmm_ok` log line.
 
-1. **Page-aligned handoff allocation strategy** — move the kernel image buffer,
-   early stack, and handoff-owned metadata from convenient loader pool
-   allocations toward a more deliberate early physical-memory placement policy.
+The next follow-on work moves up-stack into virtual memory management:
 
-See `docs/DEVELOPMENT_BIBLE.md` Section 17.2 for the full Phase 1 task table.
+1. **GDT setup** — install a 64-bit flat-model Global Descriptor Table before
+   any interrupt or protection work can proceed.
+2. **IDT + basic exception handlers** — set up the Interrupt Descriptor Table
+   with at minimum page-fault, GP-fault, and double-fault handlers so crashes
+   diagnose cleanly rather than resetting the machine.
+3. **Virtual memory manager** — implement `map_page()` / `unmap_page()` using
+   the PMM for page-table page allocations, and remap the kernel to a
+   canonical higher-half virtual address.
+
+See `docs/DEVELOPMENT_BIBLE.md` Section 17.3 for the full Phase 2 task table.

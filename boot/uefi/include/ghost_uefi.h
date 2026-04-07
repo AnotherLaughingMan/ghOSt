@@ -90,6 +90,13 @@ typedef enum {
 } EFI_MEMORY_TYPE;
 
 typedef enum {
+    AllocateAnyPages,
+    AllocateMaxAddress,
+    AllocateAddress,
+    MaxAllocateType
+} EFI_ALLOCATE_TYPE;
+
+typedef enum {
     PixelRedGreenBlueReserved8BitPerColor,
     PixelBlueGreenRedReserved8BitPerColor,
     PixelBitMask,
@@ -130,11 +137,13 @@ typedef EFI_STATUS(EFIAPI *EFI_TEXT_ENABLE_CURSOR)(EFI_SIMPLE_TEXT_OUTPUT_PROTOC
 typedef EFI_STATUS(EFIAPI *EFI_IMAGE_EXIT)(EFI_HANDLE image_handle, EFI_STATUS exit_status, UINTN exit_data_size, CHAR16 *exit_data);
 typedef EFI_STATUS(EFIAPI *EFI_EXIT_BOOT_SERVICES)(EFI_HANDLE image_handle, UINTN map_key);
 typedef EFI_STATUS(EFIAPI *EFI_GET_MEMORY_MAP)(UINTN *memory_map_size, EFI_MEMORY_DESCRIPTOR *memory_map, UINTN *map_key, UINTN *descriptor_size, UINT32 *descriptor_version);
+typedef EFI_STATUS(EFIAPI *EFI_ALLOCATE_PAGES)(EFI_ALLOCATE_TYPE type, EFI_MEMORY_TYPE memory_type, UINTN pages, EFI_PHYSICAL_ADDRESS *memory);
 typedef EFI_STATUS(EFIAPI *EFI_ALLOCATE_POOL)(EFI_MEMORY_TYPE pool_type, UINTN size, VOID **buffer);
 typedef EFI_STATUS(EFIAPI *EFI_FILE_CLOSE)(EFI_FILE_PROTOCOL *this_file);
 typedef EFI_STATUS(EFIAPI *EFI_FILE_GET_INFO)(EFI_FILE_PROTOCOL *this_file, EFI_GUID *information_type, UINTN *buffer_size, VOID *buffer);
 typedef EFI_STATUS(EFIAPI *EFI_FILE_OPEN)(EFI_FILE_PROTOCOL *this_file, EFI_FILE_PROTOCOL **new_handle, const CHAR16 *file_name, UINT64 open_mode, UINT64 attributes);
 typedef EFI_STATUS(EFIAPI *EFI_FILE_READ)(EFI_FILE_PROTOCOL *this_file, UINTN *buffer_size, VOID *buffer);
+typedef EFI_STATUS(EFIAPI *EFI_FREE_PAGES)(EFI_PHYSICAL_ADDRESS memory, UINTN pages);
 typedef EFI_STATUS(EFIAPI *EFI_FREE_POOL)(VOID *buffer);
 typedef EFI_STATUS(EFIAPI *EFI_HANDLE_PROTOCOL)(EFI_HANDLE handle, EFI_GUID *protocol, VOID **interface_out);
 typedef EFI_STATUS(EFIAPI *EFI_LOCATE_PROTOCOL)(EFI_GUID *protocol, VOID *registration, VOID **interface_out);
@@ -243,8 +252,8 @@ struct EFI_BOOT_SERVICES {
     EFI_TABLE_HEADER hdr;
     VOID *raise_tpl;
     VOID *restore_tpl;
-    VOID *allocate_pages;
-    VOID *free_pages;
+    EFI_ALLOCATE_PAGES allocate_pages;
+    EFI_FREE_PAGES free_pages;
     EFI_GET_MEMORY_MAP get_memory_map;
     EFI_ALLOCATE_POOL allocate_pool;
     EFI_FREE_POOL free_pool;

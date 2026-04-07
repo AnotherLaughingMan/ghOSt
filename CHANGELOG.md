@@ -19,6 +19,16 @@ See the [Development Bible](docs/DEVELOPMENT_BIBLE.md) Section 16 for the full v
 
 #### Added
 
+- Single source-of-truth kernel version header added at `/boot/kernel/include/ghost_version.h` with compile-time constants and `GHOST_VERSION_STRING`.
+
+#### Changed
+
+- Stage0 boot banner now prints the kernel version directly from the version header (`ghOSt kernel v0.1.0`), and the Phase 1 build script now enforces/version-wires that header into stage0 compilation.
+
+### [0.1.0] — Kernel — 2026-04-06
+
+#### Added
+
 - Project foundation: repository initialized with core documentation.
 - **Development Bible** (`/docs/DEVELOPMENT_BIBLE.md`) — canonical design reference covering architecture, philosophy, and roadmap.
 - **LICENSE** (`/LICENSE`) — project licensed under GPL-3.0-or-later.
@@ -57,6 +67,8 @@ See the [Development Bible](docs/DEVELOPMENT_BIBLE.md) Section 16 for the full v
 - Phase 1 staged-ESP boot flow now emits `startup.nsh` so the ghOSt sign-of-life app still launches when OVMF drops to the internal shell before selecting the fallback boot path.
 - Phase 1 UEFI sign-of-life loader now acquires the UEFI memory map and logs usable RAM regions plus a usable-after-exit summary during QEMU/OVMF bring-up.
 - Phase 1 UEFI sign-of-life loader now locates GOP, logs framebuffer resolution and base/size, and writes a small framebuffer test pattern when the pixel layout is directly usable.
+- Phase 1 UEFI bring-up now includes an early physical memory manager: `ghost_pmm_init()` walks the final UEFI memory map, classifies reclaimable regions (EfiConventionalMemory, EfiBootServicesCode, EfiBootServicesData), builds a 4 KiB-granular bitmap covering the physical RAM address space, and marks the bitmap's own pages as used. `ghost_pmm_alloc_page()` and `ghost_pmm_free_page()` are fully functional; stage0 calls PMM init and emits `kernel_stage0 pmm_ok` with page statistics before halting.
+- The loader now zero-fills the kernel payload BSS region (the gap between file size and image_size in the header) and validates against the allocated page-aligned size rather than the raw file size, correctly handling flat-binary payloads that carry a `.bss` section.
 - Phase 1 UEFI sign-of-life loader now opens a staged ESP payload, reads `ghOSt\kernel-stage0.bin` into loader-owned memory, and validates its `GHOSTKRN-STAGE0` marker under QEMU/OVMF.
 - Phase 1 UEFI bring-up now uses a split loader layout with a small `efi_main` entry file plus a dedicated loader module that prepares a ghOSt-owned boot-info handoff struct from the loaded payload, GOP state, and latest UEFI memory map.
 - Phase 1 UEFI bring-up now assembles a repo-owned raw `kernel-stage0.bin` payload with NASM, resolves its entry address from a tiny stage-0 header, exits boot services cleanly, and jumps into the payload under QEMU/OVMF.
@@ -78,6 +90,12 @@ See the [Development Bible](docs/DEVELOPMENT_BIBLE.md) Section 16 for the full v
 
 #### Added
 
+- Start new UX changelog entries here for the next UX version increment.
+
+### [0.1.0] — UX Shell — 2026-04-06
+
+#### Added
+
 - Dark mode established as default theme; theme architecture defined (JSON + CSS tokens, hot-swap, schema versioning).
 - GPU-accelerated UX rendering architecture defined with mandatory software fallback.
 - UX version display planned for **System → Help → About** dialog (shows both kernel and UX versions).
@@ -86,8 +104,8 @@ See the [Development Bible](docs/DEVELOPMENT_BIBLE.md) Section 16 for the full v
 
 ## Release History
 
-_No releases yet. Development is in the documentation and planning phase._
-_This project is worked on in bursts — some long, some short. It is a ground-up OS; there are no shortcuts._
+- **Kernel/OS v0.1.0** (2026-04-06): First tracked release cut from the initial bring-up stream.
+- **UX Shell v0.1.0** (2026-04-06): Initial UX-track release marker established (planning-only track so far).
 
 ---
 
