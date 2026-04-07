@@ -13,7 +13,7 @@ _Designed for user sovereignty, censorship resistance, and privacy by architectu
 >
 > ### 🚫 CALIFORNIA RESTRICTION NOTICE
 >
-> **The ghOSt operating system, its kernel, and all associated source code are strictly NOT authorized for distribution, use, compilation, modification, or deployment within the State of California.** Any use of this software by individuals or entities located in or operating from California is expressly prohibited. By accessing this repository, you acknowledge and agree to this restriction. See the full [Legal Disclaimer](LEGAL_DISCLAIMER.md) for details.
+> **The ghOSt operating system, its kernel, and all associated source code are strictly NOT authorized for distribution, use, compilation, modification, or deployment within the State of California.** Any use of this software by individuals or entities located in or operating from California is expressly prohibited. This restriction is prompted by California **[SB-1047](https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240SB1047)** (_Safe and Secure Innovation for Frontier Artificial Intelligence Models Act_) and the broader regulatory trajectory it represents. By accessing this repository, you acknowledge and agree to this restriction. See the full [Legal Disclaimer](LEGAL_DISCLAIMER.md) for details.
 
 ---
 

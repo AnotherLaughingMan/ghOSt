@@ -45,6 +45,12 @@ The Software may incorporate or reference third-party libraries, tools, specific
 
 > **⚠️ IMPORTANT: READ THIS SECTION CAREFULLY**
 
+### Legislative Basis
+
+This restriction is prompted by California **Senate Bill 1047** ([SB-1047](https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240SB1047)), the _Safe and Secure Innovation for Frontier Artificial Intelligence Models Act_ (2023–2024 Legislative Session), and the broader regulatory direction it signals for software development, distribution, and compliance within the State of California. While SB-1047 was vetoed by the Governor on September 29, 2024, its provisions — and the likelihood of successor legislation adopting similar or expanded mandates — are fundamentally incompatible with ghOSt's core design principles of user sovereignty, zero telemetry, no mandatory content filtering, and no age-gating at the OS level. The author has determined that proactive exclusion of California from the Software's authorized jurisdictions is necessary to avoid present and future regulatory conflict.
+
+### Restriction
+
 **The ghOSt operating system, its kernel, and all associated source code, binaries, documentation, and derivative works are strictly NOT authorized for distribution, use, compilation, execution, modification, or deployment within the State of California, United States of America.**
 
 This restriction applies to, without limitation:
