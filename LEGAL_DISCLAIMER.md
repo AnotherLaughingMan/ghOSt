@@ -90,7 +90,26 @@ If any provision of this disclaimer is found to be unenforceable or invalid unde
 
 This disclaimer shall be governed by and construed in accordance with applicable law, without regard to conflict of law principles. Any disputes arising under or in connection with this disclaimer shall be resolved in a court of competent jurisdiction.
 
-## 10. Modifications
+## 10. Ownership
+
+All source code, binaries, documentation, build scripts, tools, and any other materials comprising the ghOSt operating system (the "Work") are the sole and exclusive intellectual property of **AnotherLaughingMan** (the "Owner"). This ownership applies to all contributions, whether made directly by the Owner or accepted by the Owner from third-party contributors under the terms of this project's license.
+
+### Usage Rights
+
+The Owner retains full authority to use, license, sublicense, distribute, modify, or otherwise exploit the Work for any **private or public** purpose, without limitation.
+
+### Prohibition on Posthumous Ownership Transfer
+
+Upon the death of the Owner, **no transfer, assignment, inheritance, bequest, or conveyance of ownership** of the Work — in whole or in part — shall occur to any individual, entity, estate, trust, heir, successor, organization, corporation, or government body. This prohibition is absolute and applies regardless of:
+
+- Any will, testament, codicil, trust instrument, or estate plan purporting to transfer ownership.
+- Any court order, probate proceeding, or legal judgment directing transfer.
+- Any claim by heirs, next of kin, executors, administrators, or beneficiaries.
+- Any contractual arrangement entered into by the Owner prior to death that purports to transfer post-mortem rights.
+
+Upon the Owner's death, the Work shall remain available under its then-current open-source license (GPL-3.0-or-later) in perpetuity, but **no individual or entity shall assume the role of Owner or claim proprietary ownership rights** over the Work. The Work becomes and remains community-held open-source software with no successor owner.
+
+## 11. Modifications
 
 The author reserves the right to modify this disclaimer at any time without prior notice. Continued use of the Software after any such modification constitutes acceptance of the updated terms. It is your responsibility to review this disclaimer periodically.
 
